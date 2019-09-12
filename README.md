@@ -96,6 +96,7 @@ and `results/benchmarks.json` containing:
   },
   "version": 2
 }
+```
 a `<machine>/machine.json` file containing:
 ```
 {
