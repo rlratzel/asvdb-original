@@ -1,5 +1,10 @@
 # ASVDb
 
+Python interface to a ASV "database", as described [here](https://asv.readthedocs.io/en/stable/dev.html?highlight=%24results_dir#benchmark-suite-layout-and-file-formats).
+
+NOTE: This is currently a "write-only" interface.
+
+Example:
 Add a benchmark result to the "database"
 ```
 import platform
@@ -48,7 +53,7 @@ db = ASVDb(dbDir="/datasets/benchmarks/asv",
            repo=repo,
            branches=[branch])
 
-# Each addresult() call adds the result and creates/updates all JSON files
+# Each addResult() call adds the result and creates/updates all JSON files
 db.addResult(bInfo, bResult1)
 db.addResult(bInfo, bResult2)
 ```
