@@ -27,7 +27,7 @@ class BenchmarkInfo:
         self.osType = osType
         self.pythonVer = pythonVer
         self.commitHash = commitHash
-        self.commitTime = commitTime
+        self.commitTime = int(commitTime)
 
         self.gpuType = gpuType
         self.cpuType = cpuType
@@ -271,7 +271,7 @@ class ASVDb:
             resultDict["params"] = [list(l) for l in zip(*existingParamValuesList)]
 
         d["commit_hash"] = benchmarkInfo.commitHash
-        d["date"] = benchmarkInfo.commitTime
+        d["date"] = int(benchmarkInfo.commitTime)
         d["python"] = benchmarkInfo.pythonVer
         d["version"] = 1
 
