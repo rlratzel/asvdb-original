@@ -6,7 +6,7 @@ NOTE: This is currently a "write-only" interface.
 
 Example:
 
-Add a benchmark result to the "database"
+Add benchmark results to the "database"
 ```
 import platform
 import psutil
