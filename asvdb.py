@@ -48,6 +48,11 @@ class ASVDb:
     machineFileName = "machine.json"
 
     def __init__(self, dbDir, repo, branches=None):
+        """
+        dbDir -
+        repo -
+        branches - https://asv.readthedocs.io/en/stable/asv.conf.json.html#branches
+        """
         self.dbDir = dbDir
         self.confFilePath = path.join(self.dbDir, self.confFileName)
         d = self.__getJsonDictFromFile(self.confFilePath)
