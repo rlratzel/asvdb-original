@@ -301,8 +301,9 @@ class ASVDb:
                 # just ignore for now (TODO: use a different locking mechanism)
                 try:
                     fcntl.flock(fobj, fcntl.LOCK_EX)
-                except OSError:
-                    pass
+                except OSError as e:
+                    print("Could not get file lock, ignoring. (OSError: %s)" % e)
+
                 # FIXME: error checking
                 return json.load(fobj)
 
@@ -319,6 +320,7 @@ class ASVDb:
             # ignore for now (TODO: use a different locking mechanism)
             try:
                 fcntl.flock(fobj, fcntl.LOCK_EX)
-            except OSError:
-                pass
+            except OSError as e:
+                print("Could not get file lock, ignoring. (OSError: %s)" % e)
+
             json.dump(jsonDict, fobj, indent=2)
