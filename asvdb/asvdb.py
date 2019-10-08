@@ -14,6 +14,7 @@ class BenchmarkResult:
         self.name = funcName
         self.argNameValuePairs = self.__sanitizeArgNameValues(argNameValuePairs)
         self.result = result
+        self.unit = "seconds"
 
     def __sanitizeArgNameValues(self, argNameValuePairs):
         return [(n, str(v if v is not None else "NaN")) for (n, v) in argNameValuePairs]
@@ -121,6 +122,7 @@ class ASVDb:
         benchDict = d.setdefault(benchmarkResult.name,
                                  self.__getDefaultBenchmarkDescrDict(
                                      benchmarkResult.name, newParamNames))
+        benchDict["unit"] = benchmarkResult.unit
 
         existingParamNames = benchDict["param_names"]
         existingParamValues = benchDict["params"]
@@ -168,19 +170,19 @@ class ASVDb:
         #     "version": 1,
         # }
 
-        resultsFilePath = path.join(self.resultsDirPath,
+        machineFilePath = path.join(self.resultsDirPath,
                                     benchmarkInfo.machineName,
                                     self.machineFileName)
-        d = self.__loadJsonDictFromFile(resultsFilePath)
+        d = self.__loadJsonDictFromFile(machineFilePath)
         d["arch"] = benchmarkInfo.arch
         d["cpu"] = benchmarkInfo.cpuType
         d["gpu"] = benchmarkInfo.gpuType
-        d["cuda"] = benchmarkInfo.cudaVer
+        #d["cuda"] = benchmarkInfo.cudaVer
         d["machine"] = benchmarkInfo.machineName
-        d["os"] = benchmarkInfo.osType
+        #d["os"] = benchmarkInfo.osType
         d["ram"] = benchmarkInfo.ram
         d["version"] = 1
-        self.__writeJsonDictToFile(d, resultsFilePath)
+        self.__writeJsonDictToFile(d, machineFilePath)
 
 
     def __updateResultJson(self, benchmarkResult, benchmarkInfo):
@@ -221,9 +223,7 @@ class ASVDb:
         #     "version": 1,
         # }
 
-        resultsFilePath = path.join(self.resultsDirPath,
-                                    benchmarkInfo.machineName,
-                                    "%s.json" % (benchmarkInfo.commitHash))
+        resultsFilePath = self.__getResultsFilePath(benchmarkInfo)
         d = self.__loadJsonDictFromFile(resultsFilePath)
         d["params"] = {"gpu": benchmarkInfo.gpuType,
                        "cuda": benchmarkInfo.cudaVer,
@@ -301,6 +301,20 @@ class ASVDb:
                 "unit": "seconds",
                 "version": 2,
                 }
+
+
+    def __getResultsFilePath(self, benchmarkInfo):
+        # The path to the resultsFile will be based on additional params present
+        # in the benchmarkInfo obj.
+        fileNameParts = [benchmarkInfo.commitHash,
+                         "python%s" % benchmarkInfo.pythonVer,
+                         "cuda%s" % benchmarkInfo.cudaVer,
+                         benchmarkInfo.osType,
+                        ]
+        fileName = "-".join(fileNameParts) + ".json"
+        return path.join(self.resultsDirPath,
+                         benchmarkInfo.machineName,
+                         fileName)
 
 
     def __loadJsonDictFromFile(self, jsonFile):
