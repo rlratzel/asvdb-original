@@ -68,7 +68,8 @@ class ASVDb:
         self.benchmarksFilePath = path.join(self.resultsDirPath, self.benchmarksFileName)
 
         d["repo"] = repo
-        d["branches"] = branches or []
+        currentBranches = d.get("branches", [])
+        d["branches"] = currentBranches + [b for b in (branches or []) if b not in currentBranches]
         d["version"] = 1
 
         # FIXME: consider a separate method for writing this file, ctor may not
