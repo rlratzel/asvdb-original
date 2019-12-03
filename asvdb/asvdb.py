@@ -67,7 +67,8 @@ class ASVDb:
         self.htmlDirName = d.setdefault("html_dir", self.defaultHtmlDirName)
         self.benchmarksFilePath = path.join(self.resultsDirPath, self.benchmarksFileName)
 
-        d["repo"] = repo
+        # ASVDb is git-only for now, so ensure .git extension
+        d["repo"] = repo + (".git" if not repo.endswith(".git") else "")
         currentBranches = d.get("branches", [])
         d["branches"] = currentBranches + [b for b in (branches or []) if b not in currentBranches]
         d["version"] = 1

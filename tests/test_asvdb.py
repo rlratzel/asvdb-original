@@ -73,3 +73,23 @@ def test_newBranch():
     assert branches == [branch1, branch2]
 
     asvDir.cleanup()
+
+
+def test_gitExtension():
+
+    from asvdb import ASVDb
+
+    asvDir = tempfile.TemporaryDirectory()
+    repo = "somerepo"
+    branch1 = "branch1"
+
+    db1 = ASVDb(asvDir.name, repo, [branch1])
+
+    confFile = path.join(asvDir.name, "asv.conf.json")
+    with open(confFile) as fobj:
+        j = json.load(fobj)
+        repo = j["repo"]
+
+    assert repo.endswith(".git")
+
+    asvDir.cleanup()
