@@ -51,7 +51,7 @@ class ASVDb:
     benchmarksFileName = "benchmarks.json"
     machineFileName = "machine.json"
 
-    def __init__(self, dbDir, repo, branches=None):
+    def __init__(self, dbDir, repo, branches=None, projectName=None, commitUrl=None):
         """
         dbDir -
         repo -
@@ -72,6 +72,11 @@ class ASVDb:
         currentBranches = d.get("branches", [])
         d["branches"] = currentBranches + [b for b in (branches or []) if b not in currentBranches]
         d["version"] = 1
+        d["project"] = projectName or repo.replace(".git", "").split("/")[-1]
+        d["show_commit_url"] = commitUrl or \
+                               (repo.replace(".git", "") \
+                                + ("/" if not repo.endswith("/") else "") \
+                                + "commit/")
 
         # FIXME: consider a separate method for writing this file, ctor may not
         # be appropriate
