@@ -25,7 +25,7 @@ def getCommandOutput(cmd):
 def getCommitInfo():
     commitHash = getCommandOutput("git rev-parse HEAD")
     commitTime = getCommandOutput("git log -n1 --pretty=%%ct %s" % commitHash)
-    return (commitHash, str(int(commitTime)*100))
+    return (commitHash, str(int(commitTime)*1000))
 
 
 def getCudaVer():
