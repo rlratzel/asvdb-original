@@ -1,9 +1,7 @@
-from distutils.core import setup
+from setuptools import setup
 
-setup(name="ASVDb",
-      version="0.1.6dev0",
-      packages=["asvdb",
-                ],
-      license="Apache 2.0",
+setup(name="asvdb",
+      version="0.1.7dev0",
+      packages=["asvdb"],
       description='ASV "database" interface',
       )
