@@ -1,8 +1,9 @@
 import json
 import os
 from os import path
-import fcntl
 import itertools
+import glob
+import time
 
 
 class BenchmarkResult:
@@ -10,13 +11,15 @@ class BenchmarkResult:
     The result of a benchmark run for a particular benchmark function, given
     specific args.
     """
-    def __init__(self, funcName, argNameValuePairs, result):
+    def __init__(self, funcName, result, argNameValuePairs=None):
         self.name = funcName
         self.argNameValuePairs = self.__sanitizeArgNameValues(argNameValuePairs)
         self.result = result
         self.unit = "seconds"
 
     def __sanitizeArgNameValues(self, argNameValuePairs):
+        if argNameValuePairs is None:
+            return []
         return [(n, str(v if v is not None else "NaN")) for (n, v) in argNameValuePairs]
 
 
@@ -24,7 +27,8 @@ class BenchmarkInfo:
     """
     Meta-data describing the environment for a benchmark or set of benchmarks.
     """
-    def __init__(self, machineName, cudaVer, osType, pythonVer, commitHash, commitTime,
+    def __init__(self, machineName="", cudaVer="", osType="", pythonVer="",
+                 commitHash="", commitTime=0,
                  gpuType="", cpuType="", arch="", ram=""):
         self.machineName = machineName
         self.cudaVer = cudaVer
@@ -51,7 +55,7 @@ class ASVDb:
     benchmarksFileName = "benchmarks.json"
     machineFileName = "machine.json"
 
-    def __init__(self, dbDir, repo, branches=None, projectName=None, commitUrl=None):
+    def __init__(self, dbDir, repo, branches=None, projectName=None, commitUrl=None, writeDelay=0):
         """
         dbDir -
         repo -
@@ -66,6 +70,17 @@ class ASVDb:
         self.resultsDirPath = path.join(dbDir, self.resultsDirName)
         self.htmlDirName = d.setdefault("html_dir", self.defaultHtmlDirName)
         self.benchmarksFilePath = path.join(self.resultsDirPath, self.benchmarksFileName)
+
+        self.lockFilePrefix = ".asvdbLOCK"
+        self.lockFileName = "%s-%s-%s" % (self.lockFilePrefix, os.getpid(), time.time())
+        self.lockFileTimeout = 5  # seconds
+
+        # For testing - adds a delay during write operations to easily test
+        # write collision situations.
+        self.writeDelay = writeDelay
+        # To support "cancelling" write operations that are paused, mainly
+        # needed for testing.
+        self.doWriteOperations = True
 
         # ASVDb is git-only for now, so ensure .git extension
         d["repo"] = repo + (".git" if not repo.endswith(".git") else "")
@@ -83,10 +98,31 @@ class ASVDb:
         self.__writeJsonDictToFile(d, self.confFilePath)
 
 
+    def __checkForWritePermission(self):
+        """
+        Testing helper: pause for self.writeDelay seconds, or until
+        self.doWriteOperations turns False, then return the last value of
+        self.doWriteOperations to indicate if a write should take place. Always
+        return self.doWriteOperations to True so future writes can take place by
+        default.
+        """
+        if self.doWriteOperations:
+            st = now = time.time()
+            while ((now - st) < self.writeDelay) and self.doWriteOperations:
+                time.sleep(0.01)
+                now = time.time()
+        retVal = self.doWriteOperations
+        self.doWriteOperations = True
+        return retVal
+
+
     def addResult(self, benchmarkInfo, benchmarkResult):
-        self.__updateBenchmarkJson(benchmarkResult)
-        self.__updateMachineJson(benchmarkInfo)
-        self.__updateResultJson(benchmarkResult, benchmarkInfo)
+        self.__getLock(self.dbDir)
+        if self.__checkForWritePermission():
+            self.__updateBenchmarkJson(benchmarkResult)
+            self.__updateMachineJson(benchmarkInfo)
+            self.__updateResultJson(benchmarkResult, benchmarkInfo)
+        self.__releaseLock(self.dbDir)
 
 
     def __updateBenchmarkJson(self, benchmarkResult):
@@ -331,17 +367,102 @@ class ASVDb:
         """
         if path.exists(jsonFile):
             with open(jsonFile) as fobj:
-                # some situations do not allow grabbing a file lock (NFS?) so
-                # just ignore for now (TODO: use a different locking mechanism)
-                try:
-                    fcntl.flock(fobj, fcntl.LOCK_EX)
-                except OSError as e:
-                    print("Could not get file lock, ignoring. (OSError: %s)" % e)
-
+                # FIXME: ideally this could use flock(), but some situations do
+                # not allow grabbing a file lock (NFS?)
+                # fcntl.flock(fobj, fcntl.LOCK_EX)
                 # FIXME: error checking
                 return json.load(fobj)
 
         return {}
+
+
+    def __updateOtherLockfileTimes(self, dirPath, lockFileTimes):
+        """
+        Return a list of lockfiles that have "timed out", probably because their
+        process was killed. This will never include the lockfile for this
+        instance.  Update the lockFileTimes dict as a side effect with the
+        discovery time of any new lockfiles and remove any lockfiles that are no
+        longer present.
+        """
+        thisLockFile = path.join(dirPath, self.lockFileName)
+        now = time.time()
+        expired = []
+
+        allLockFiles = glob.glob(path.join(dirPath, self.lockFilePrefix) + "*")
+
+        # Remove lockfiles from the lockFileTimes dict that are no longer
+        # present on disk
+        for removedLockfile in set(lockFileTimes.keys()) - set(allLockFiles):
+            lockFileTimes.pop(removedLockfile)
+
+        # check for expired lockfiles while also setting the discovery time on
+        # new lockfiles in the lockFileTimes dict.
+        for lockFile in allLockFiles:
+            if lockFile == thisLockFile:
+                continue
+
+            if (now - lockFileTimes.setdefault(lockFile, now)) > \
+               self.lockFileTimeout:
+                expired.append(lockFile)
+
+        self.__removeFiles(expired)
+
+
+    def __removeFiles(self, fileList):
+        for f in fileList:
+            os.remove(f)
+
+
+    def __createLockfile(self, dirPath):
+        """
+        low-level lockfile creation - consider calling __getLock() instead.
+        """
+        thisLockFile = path.join(dirPath, self.lockFileName)
+        open(thisLockFile, "w").close()
+
+
+    def __getLock(self, dirPath):
+
+        """
+        * check dirPath for locks from other processes and keep track of when
+          they were seen in a dict
+        * iterate and keep updating the dict of lockfile:timestamp
+        * remove lockfiles from presumed dead processes if they've been
+          around > 5 seconds
+        * as soon as an iteration sees no other lock files, create the lock
+          for this process
+        * check once again for other locks in the event a race condition
+          allowed another lock to get in while creating this one
+        * if no other locks, return
+        * if other locks, remove this lock, wait random seconds <5, repeat
+          above loop checking for locks and keeping a dict.
+        """
+        otherLockFileTimes = {}
+        thisLockFile = path.join(dirPath, self.lockFileName)
+        while True:
+            self.__updateOtherLockfileTimes(dirPath, otherLockFileTimes)
+
+            while otherLockFileTimes.keys():
+                time.sleep(0.2)
+                self.__updateOtherLockfileTimes(dirPath, otherLockFileTimes)
+
+            # all clear, create lock
+            self.__createLockfile(dirPath)
+
+            # check for a race condition where another lock could have been created
+            # while creating the lock for this instance.
+            self.__updateOtherLockfileTimes(dirPath, otherLockFileTimes)
+
+            if otherLockFileTimes:
+                self.__releaseLock(dirPath)
+                time.sleep((int(3 * random.random()) + 1) + random.random())
+            else:
+                break
+
+
+    def __releaseLock(self, dirPath):
+        thisLockFile = path.join(dirPath, self.lockFileName)
+        self.__removeFiles([thisLockFile])
 
 
     def __writeJsonDictToFile(self, jsonDict, filePath):
@@ -349,12 +470,13 @@ class ASVDb:
         dirPath = path.dirname(filePath)
         if not path.isdir(dirPath):
             os.makedirs(dirPath)
-        with open(filePath, "w") as fobj:
-            # some situations do not allow grabbing a file lock (NFS?) so just
-            # ignore for now (TODO: use a different locking mechanism)
-            try:
-                fcntl.flock(fobj, fcntl.LOCK_EX)
-            except OSError as e:
-                print("Could not get file lock, ignoring. (OSError: %s)" % e)
 
+        self.__getLock(dirPath)
+
+        with open(filePath, "w") as fobj:
+            # FIXME: ideally this could use flock(), but some situations do not
+            # allow grabbing a file lock (NFS?)
+            # fcntl.flock(fobj, fcntl.LOCK_EX)
             json.dump(jsonDict, fobj, indent=2)
+
+        self.__releaseLock(dirPath)

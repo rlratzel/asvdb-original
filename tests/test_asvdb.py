@@ -1,6 +1,9 @@
 from os import path
 import tempfile
 import json
+import threading
+
+import pytest
 
 datasetName = "dolphins.csv"
 algoRunResults = [('loadDataFile', 3.2228727098554373),
@@ -21,12 +24,12 @@ algoRunResults = [('loadDataFile', 3.2228727098554373),
                   ('degrees', None)]
 
 
+@pytest.mark.skip(reason="Not written yet")
 def test_addResult():
     """
     FIXME: This is not a test yet, use example code below to create 1 or more tests
     """
     return
-    # Lets say there
 
     (commitHash, commitTime) = getCommitInfo()
     (repo, branch) = getRepoInfo()
@@ -92,4 +95,36 @@ def test_gitExtension():
 
     assert repo.endswith(".git")
 
+    asvDir.cleanup()
+
+
+def test_concurrency():
+
+    from asvdb import ASVDb, BenchmarkInfo, BenchmarkResult
+
+    asvDir = tempfile.TemporaryDirectory()
+    repo = "somerepo"
+    branch1 = "branch1"
+
+    # Use the writeDelay arg to insert a delay during write to properly test
+    # collisions by making writes slow.
+    db1 = ASVDb(asvDir.name, repo, [branch1], writeDelay=6)
+    db2 = ASVDb(asvDir.name, repo, [branch1])
+
+    bInfo = BenchmarkInfo()
+    bResult = BenchmarkResult(funcName="somebenchmark", result=43)
+
+    # db1 should be actively writing the result (because the writeDelay is long)
+    # and db2 should be blocked.  Wait for db2 in a thread, and if it returned
+    # (theb thread is no longer alive) the test was a failure.
+    t1 = threading.Thread(target=db1.addResult, args=(bInfo, bResult))
+    t2 = threading.Thread(target=db2.addResult, args=(bInfo, bResult))
+    t1.start()
+    t2.start()
+    t2.join(timeout=1)
+    assert t2.is_alive() is True
+    db1.doWriteOperations = False
+    db2.doWriteOperations = False
+    t1.join()
+    t2.join()
     asvDir.cleanup()
