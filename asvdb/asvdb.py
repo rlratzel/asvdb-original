@@ -4,6 +4,8 @@ from os import path
 import itertools
 import glob
 import time
+import random
+import stat
 
 
 class BenchmarkResult:
@@ -54,75 +56,83 @@ class ASVDb:
     defaultConfVersion = 1
     benchmarksFileName = "benchmarks.json"
     machineFileName = "machine.json"
+    lockfilePrefix = ".asvdbLOCK"
 
-    def __init__(self, dbDir, repo, branches=None, projectName=None, commitUrl=None, writeDelay=0):
+    def __init__(self, dbDir, repo, branches=None, projectName=None, commitUrl=None):
         """
         dbDir -
         repo -
         branches - https://asv.readthedocs.io/en/stable/asv.conf.json.html#branches
         """
         self.dbDir = dbDir
+        self.repo = repo
+        self.branches = branches
+        self.projectName = projectName
+        self.commitUrl = commitUrl
         self.confFilePath = path.join(self.dbDir, self.confFileName)
-        d = self.__loadJsonDictFromFile(self.confFilePath)
 
-        self.confVersion = self.defaultConfVersion
-        self.resultsDirName = d.setdefault("results_dir", self.defaultResultsDirName)
-        self.resultsDirPath = path.join(dbDir, self.resultsDirName)
-        self.htmlDirName = d.setdefault("html_dir", self.defaultHtmlDirName)
-        self.benchmarksFilePath = path.join(self.resultsDirPath, self.benchmarksFileName)
+        # Each ASVDb instance must have a unique lockfile name to identify other
+        # instances that may be setting locks.
+        self.lockfileName = "%s-%s-%s" % (self.lockfilePrefix, os.getpid(), time.time())
+        self.lockfileTimeout = 5  # seconds
 
-        self.lockFilePrefix = ".asvdbLOCK"
-        self.lockFileName = "%s-%s-%s" % (self.lockFilePrefix, os.getpid(), time.time())
-        self.lockFileTimeout = 5  # seconds
+        self.__confFileUpdated = False
 
-        # For testing - adds a delay during write operations to easily test
-        # write collision situations.
-        self.writeDelay = writeDelay
-        # To support "cancelling" write operations that are paused, mainly
-        # needed for testing.
-        self.doWriteOperations = True
-
-        # ASVDb is git-only for now, so ensure .git extension
-        d["repo"] = repo + (".git" if not repo.endswith(".git") else "")
-        currentBranches = d.get("branches", [])
-        d["branches"] = currentBranches + [b for b in (branches or []) if b not in currentBranches]
-        d["version"] = 1
-        d["project"] = projectName or repo.replace(".git", "").split("/")[-1]
-        d["show_commit_url"] = commitUrl or \
-                               (repo.replace(".git", "") \
-                                + ("/" if not repo.endswith("/") else "") \
-                                + "commit/")
-
-        # FIXME: consider a separate method for writing this file, ctor may not
-        # be appropriate
-        self.__writeJsonDictToFile(d, self.confFilePath)
+        ########################################
+        # Testing and debug members
+        self.debugPrint = False
+        # adds a delay during write operations to easily test write collision
+        # handling.
+        self.writeDelay = 0
+        # To "cancel" write operations that are paused
+        self.cancelWrite = False
 
 
-    def __checkForWritePermission(self):
+
+    def updateConfFile(self):
         """
-        Testing helper: pause for self.writeDelay seconds, or until
-        self.doWriteOperations turns False, then return the last value of
-        self.doWriteOperations to indicate if a write should take place. Always
-        return self.doWriteOperations to True so future writes can take place by
-        default.
+        Update the ASV conf file with the values passed in to the CTOR, if not
+        done already from a previous write operation.
         """
-        if self.doWriteOperations:
-            st = now = time.time()
-            while ((now - st) < self.writeDelay) and self.doWriteOperations:
-                time.sleep(0.01)
-                now = time.time()
-        retVal = self.doWriteOperations
-        self.doWriteOperations = True
-        return retVal
+        self.__getLock(self.dbDir)
+        if self.__waitForWrite():
+            self.__ensureConfFileUpdated()
+        self.__releaseLock(self.dbDir)
 
 
     def addResult(self, benchmarkInfo, benchmarkResult):
         self.__getLock(self.dbDir)
-        if self.__checkForWritePermission():
+        if self.__waitForWrite():
+            self.__ensureConfFileUpdated()
             self.__updateBenchmarkJson(benchmarkResult)
             self.__updateMachineJson(benchmarkInfo)
             self.__updateResultJson(benchmarkResult, benchmarkInfo)
         self.__releaseLock(self.dbDir)
+
+
+    def __ensureConfFileUpdated(self):
+        if not(self.__confFileUpdated):
+            d = self.__loadJsonDictFromFile(self.confFilePath)
+            self.confVersion = self.defaultConfVersion
+            self.resultsDirName = d.setdefault("results_dir", self.defaultResultsDirName)
+            self.resultsDirPath = path.join(self.dbDir, self.resultsDirName)
+            self.htmlDirName = d.setdefault("html_dir", self.defaultHtmlDirName)
+            self.benchmarksFilePath = path.join(self.resultsDirPath, self.benchmarksFileName)
+
+            # ASVDb is git-only for now, so ensure .git extension
+            d["repo"] = self.repo + (".git" if not self.repo.endswith(".git") else "")
+            currentBranches = d.get("branches", [])
+            d["branches"] = currentBranches + [b for b in (self.branches or []) if b not in currentBranches]
+            d["version"] = 1
+            d["project"] = self.projectName or self.repo.replace(".git", "").split("/")[-1]
+            d["show_commit_url"] = self.commitUrl or \
+                                   (self.repo.replace(".git", "") \
+                                    + ("/" if not self.repo.endswith("/") else "") \
+                                    + "commit/")
+
+            self.__writeJsonDictToFile(d, self.confFilePath)
+
+            self.__confFileUpdated = True
 
 
     def __updateBenchmarkJson(self, benchmarkResult):
@@ -361,6 +371,7 @@ class ASVDb:
 
 
     def __loadJsonDictFromFile(self, jsonFile):
+
         """
         Return a dictionary representing the contents of jsonFile by
         either reading in the existing file or returning {}
@@ -376,102 +387,11 @@ class ASVDb:
         return {}
 
 
-    def __updateOtherLockfileTimes(self, dirPath, lockFileTimes):
-        """
-        Return a list of lockfiles that have "timed out", probably because their
-        process was killed. This will never include the lockfile for this
-        instance.  Update the lockFileTimes dict as a side effect with the
-        discovery time of any new lockfiles and remove any lockfiles that are no
-        longer present.
-        """
-        thisLockFile = path.join(dirPath, self.lockFileName)
-        now = time.time()
-        expired = []
-
-        allLockFiles = glob.glob(path.join(dirPath, self.lockFilePrefix) + "*")
-
-        # Remove lockfiles from the lockFileTimes dict that are no longer
-        # present on disk
-        for removedLockfile in set(lockFileTimes.keys()) - set(allLockFiles):
-            lockFileTimes.pop(removedLockfile)
-
-        # check for expired lockfiles while also setting the discovery time on
-        # new lockfiles in the lockFileTimes dict.
-        for lockFile in allLockFiles:
-            if lockFile == thisLockFile:
-                continue
-
-            if (now - lockFileTimes.setdefault(lockFile, now)) > \
-               self.lockFileTimeout:
-                expired.append(lockFile)
-
-        self.__removeFiles(expired)
-
-
-    def __removeFiles(self, fileList):
-        for f in fileList:
-            os.remove(f)
-
-
-    def __createLockfile(self, dirPath):
-        """
-        low-level lockfile creation - consider calling __getLock() instead.
-        """
-        thisLockFile = path.join(dirPath, self.lockFileName)
-        open(thisLockFile, "w").close()
-
-
-    def __getLock(self, dirPath):
-
-        """
-        * check dirPath for locks from other processes and keep track of when
-          they were seen in a dict
-        * iterate and keep updating the dict of lockfile:timestamp
-        * remove lockfiles from presumed dead processes if they've been
-          around > 5 seconds
-        * as soon as an iteration sees no other lock files, create the lock
-          for this process
-        * check once again for other locks in the event a race condition
-          allowed another lock to get in while creating this one
-        * if no other locks, return
-        * if other locks, remove this lock, wait random seconds <5, repeat
-          above loop checking for locks and keeping a dict.
-        """
-        otherLockFileTimes = {}
-        thisLockFile = path.join(dirPath, self.lockFileName)
-        while True:
-            self.__updateOtherLockfileTimes(dirPath, otherLockFileTimes)
-
-            while otherLockFileTimes.keys():
-                time.sleep(0.2)
-                self.__updateOtherLockfileTimes(dirPath, otherLockFileTimes)
-
-            # all clear, create lock
-            self.__createLockfile(dirPath)
-
-            # check for a race condition where another lock could have been created
-            # while creating the lock for this instance.
-            self.__updateOtherLockfileTimes(dirPath, otherLockFileTimes)
-
-            if otherLockFileTimes:
-                self.__releaseLock(dirPath)
-                time.sleep((int(3 * random.random()) + 1) + random.random())
-            else:
-                break
-
-
-    def __releaseLock(self, dirPath):
-        thisLockFile = path.join(dirPath, self.lockFileName)
-        self.__removeFiles([thisLockFile])
-
-
     def __writeJsonDictToFile(self, jsonDict, filePath):
         # FIXME: error checking
         dirPath = path.dirname(filePath)
         if not path.isdir(dirPath):
             os.makedirs(dirPath)
-
-        self.__getLock(dirPath)
 
         with open(filePath, "w") as fobj:
             # FIXME: ideally this could use flock(), but some situations do not
@@ -479,4 +399,155 @@ class ASVDb:
             # fcntl.flock(fobj, fcntl.LOCK_EX)
             json.dump(jsonDict, fobj, indent=2)
 
-        self.__releaseLock(dirPath)
+
+    ###########################################################################
+    # ASVDb private locking methods
+    ###########################################################################
+    def __getLock(self, dirPath):
+        """
+        Gets a lock on dirPath against other ASVDb instances (in other
+        processes, possibily on other machines) using the following technique:
+
+        * Check for other locks and clear them if they've been seen for longer
+          than self.lockfileTimeout (do this to help cleanup after others that
+          may have died prematurely)
+
+        * Once all locks are clear - either by their owner because they
+          finished their read/write, or by removing them because they're
+          presumed dead - create a lock for this instance
+
+        * If a race condition was detected, probably because multiple ASVDbs
+          saw all locks were cleared at the same time and created their locks
+          at the same time, remove this lock, and wait a random amount of time
+          before trying again.  The random time prevents yet another race.
+        """
+        otherLockfileTimes = {}
+        thisLockfile = path.join(dirPath, self.lockfileName)
+        # FIXME: This shouldn't be needed? But if so, be smarter about
+        # preventing an infintite loop?
+        i = 0
+        while i < 1000:
+            # Keep checking for other locks to clear
+            self.__updateOtherLockfileTimes(dirPath, otherLockfileTimes)
+            # FIXME: potential infintite loop due to starvation?
+            otherLocks = list(otherLockfileTimes.keys())
+            while otherLocks:
+                if self.debugPrint:
+                    print(f"This lock file will be {thisLockfile} but other "
+                          f"locks present: {otherLocks}, waiting to try to "
+                          "lock again...")
+                time.sleep(0.2)
+                self.__updateOtherLockfileTimes(dirPath, otherLockfileTimes)
+                otherLocks = list(otherLockfileTimes.keys())
+
+            # All clear, create lock
+            if self.debugPrint:
+                print(f"All clear, setting lock {thisLockfile}")
+            self.__createLockfile(dirPath)
+
+            # Check for a race condition where another lock could have been created
+            # while creating the lock for this instance.
+            self.__updateOtherLockfileTimes(dirPath, otherLockfileTimes)
+
+            # If another lock snuck in while this instance was creating its
+            # lock, remove this lock and wait a random amount of time before
+            # trying again (random time to prevent another race condition with
+            # the competing instance, this way someone will clearly get there
+            # first)
+            if otherLockfileTimes:
+                self.__releaseLock(dirPath)
+                randTime = (int(5 * random.random()) + 1) + random.random()
+                if self.debugPrint:
+                    print(f"Collision - waiting {randTime} seconds before "
+                          "trying to lock again.")
+                time.sleep(randTime)
+            else:
+                break
+
+            i += 1
+
+
+    def __releaseLock(self, dirPath):
+        thisLockfile = path.join(dirPath, self.lockfileName)
+        if self.debugPrint:
+            print(f"Removing lock {thisLockfile}")
+        self.__removeFiles([thisLockfile])
+
+
+    def __updateOtherLockfileTimes(self, dirPath, lockfileTimes):
+        """
+        Return a list of lockfiles that have "timed out", probably because their
+        process was killed. This will never include the lockfile for this
+        instance.  Update the lockfileTimes dict as a side effect with the
+        discovery time of any new lockfiles and remove any lockfiles that are no
+        longer present.
+        """
+        thisLockfile = path.join(dirPath, self.lockfileName)
+        now = time.time()
+        expired = []
+
+        allLockfiles = glob.glob(path.join(dirPath, self.lockfilePrefix) + "*")
+
+        if self.debugPrint:
+            print(f"   This lockfile is {thisLockfile}, allLockfiles is "
+                  f"{allLockfiles}, lockfileTimes is {lockfileTimes}")
+        # Remove lockfiles from the lockfileTimes dict that are no longer
+        # present on disk
+        lockfilesToRemove = set(lockfileTimes.keys()) - set(allLockfiles)
+        for removedLockfile in lockfilesToRemove:
+            lockfileTimes.pop(removedLockfile)
+
+        # check for expired lockfiles while also setting the discovery time on
+        # new lockfiles in the lockfileTimes dict.
+        for lockfile in allLockfiles:
+            if lockfile == thisLockfile:
+                continue
+            if (now - lockfileTimes.setdefault(lockfile, now)) > \
+               self.lockfileTimeout:
+                expired.append(lockfile)
+
+        if self.debugPrint:
+            print(f"   This lockfile is {thisLockfile}, lockfileTimes is "
+                  f"{lockfileTimes}, now is {now}, expired is {expired}")
+        self.__removeFiles(expired)
+
+
+    def __createLockfile(self, dirPath):
+        """
+        low-level lockfile creation - consider calling __getLock() instead.
+        """
+        thisLockfile = path.join(dirPath, self.lockfileName)
+        open(thisLockfile, "w").close()
+        # Make the lockfile read/write to all so others can remove it if this
+        # process dies prematurely
+        os.chmod(thisLockfile, (stat.S_IRUSR | stat.S_IWUSR
+                                | stat.S_IRGRP | stat.S_IWGRP
+                                | stat.S_IROTH | stat.S_IWOTH))
+
+
+    def __removeFiles(self, fileList):
+        for f in fileList:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+
+
+    def __waitForWrite(self):
+        """
+        Testing helper: pause for self.writeDelay seconds, or until
+        self.cancelWrite turns True. Always set self.cancelWrite back to False
+        so future writes can take place by default.
+
+        Return True to indicate a write operation should take place, False to
+        cancel the write operation, based on if the write was cancelled or not.
+        """
+        if not(self.cancelWrite):
+            st = now = time.time()
+            while ((now - st) < self.writeDelay) and not(self.cancelWrite):
+                time.sleep(0.01)
+                now = time.time()
+
+        retVal = not(self.cancelWrite)
+        self.cancelWrite = False
+        return retVal

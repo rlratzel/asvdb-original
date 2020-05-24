@@ -2,6 +2,7 @@ from os import path
 import tempfile
 import json
 import threading
+import time
 
 import pytest
 
@@ -66,7 +67,9 @@ def test_newBranch():
     branch2 = "branch2"
 
     db1 = ASVDb(asvDir.name, repo, [branch1])
+    db1.updateConfFile()
     db2 = ASVDb(asvDir.name, repo, [branch2])
+    db2.updateConfFile()
 
     confFile = path.join(asvDir.name, "asv.conf.json")
     with open(confFile) as fobj:
@@ -87,6 +90,7 @@ def test_gitExtension():
     branch1 = "branch1"
 
     db1 = ASVDb(asvDir.name, repo, [branch1])
+    db1.updateConfFile()
 
     confFile = path.join(asvDir.name, "asv.conf.json")
     with open(confFile) as fobj:
@@ -106,25 +110,47 @@ def test_concurrency():
     repo = "somerepo"
     branch1 = "branch1"
 
-    # Use the writeDelay arg to insert a delay during write to properly test
-    # collisions by making writes slow.
-    db1 = ASVDb(asvDir.name, repo, [branch1], writeDelay=6)
+    db1 = ASVDb(asvDir.name, repo, [branch1])
     db2 = ASVDb(asvDir.name, repo, [branch1])
+    db3 = ASVDb(asvDir.name, repo, [branch1])
+    # Use the writeDelay member var to insert a delay during write to properly
+    # test collisions by making writes slow.
+    db1.writeDelay = 10
+    db2.writeDelay = 10
 
     bInfo = BenchmarkInfo()
-    bResult = BenchmarkResult(funcName="somebenchmark", result=43)
+    bResult1 = BenchmarkResult(funcName="somebenchmark1", result=43)
+    bResult2 = BenchmarkResult(funcName="somebenchmark2", result=43)
+    bResult3 = BenchmarkResult(funcName="somebenchmark3", result=43)
 
-    # db1 should be actively writing the result (because the writeDelay is long)
-    # and db2 should be blocked.  Wait for db2 in a thread, and if it returned
-    # (theb thread is no longer alive) the test was a failure.
-    t1 = threading.Thread(target=db1.addResult, args=(bInfo, bResult))
-    t2 = threading.Thread(target=db2.addResult, args=(bInfo, bResult))
+    # db1 or db2 should be actively writing the result (because the writeDelay is long)
+    # and db3 should be blocked.
+    t1 = threading.Thread(target=db1.addResult, args=(bInfo, bResult1))
+    t2 = threading.Thread(target=db2.addResult, args=(bInfo, bResult2))
+    t3 = threading.Thread(target=db3.addResult, args=(bInfo, bResult3))
     t1.start()
     t2.start()
-    t2.join(timeout=1)
-    assert t2.is_alive() is True
-    db1.doWriteOperations = False
-    db2.doWriteOperations = False
+    time.sleep(0.5)  # ensure t3 tries to write last
+    t3.start()
+
+    # Check that db3 is blocked - if locking wasn't working, it would have
+    # finished since it has no writeDelay.
+    t3.join(timeout=0.5)
+    assert t3.is_alive() is True
+
+    # Cancel db1 and db2, allowing db3 to write and finish
+    db1.cancelWrite = True
+    db2.cancelWrite = True
+    t3.join(timeout=11)
+    assert t3.is_alive() is False
     t1.join()
     t2.join()
+    t3.join()
+
+    # Check that db3 wrote its result
+    with open(path.join(asvDir.name, "results", "benchmarks.json")) as fobj:
+        jo = json.load(fobj)
+        assert "somebenchmark3" in jo
+        #print(jo)
+
     asvDir.cleanup()
