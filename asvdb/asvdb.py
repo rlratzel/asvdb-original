@@ -9,38 +9,6 @@ import random
 import stat
 
 
-class BenchmarkResult:
-    """
-    The result of a benchmark run for a particular benchmark function, given
-    specific args.
-    """
-    def __init__(self, funcName, result, argNameValuePairs=None, unit=None):
-        self.name = funcName
-        self.argNameValuePairs = self.__sanitizeArgNameValues(argNameValuePairs)
-        self.result = result
-        self.unit = unit or "seconds"
-
-
-    def __sanitizeArgNameValues(self, argNameValuePairs):
-        if argNameValuePairs is None:
-            return []
-        return [(n, str(v if v is not None else "NaN")) for (n, v) in argNameValuePairs]
-
-
-    def __repr__(self):
-        return (f"{self.__class__.__name__}(funcName='{self.name}'"
-                f", result={repr(self.result)}"
-                f", argNameValuePairs={repr(self.argNameValuePairs)}"
-                f", unit='{self.unit}')")
-
-
-    def __eq__(self, other):
-        return (self.name == other.name) \
-            and (self.argNameValuePairs == other.argNameValuePairs) \
-            and (self.result == other.result) \
-            and (self.unit == other.unit)
-
-
 class BenchmarkInfo:
     """
     Meta-data describing the environment for a benchmark or set of benchmarks.
@@ -85,6 +53,38 @@ class BenchmarkInfo:
             and (self.cpuType == other.cpuType) \
             and (self.arch == other.arch) \
             and (self.ram == other.ram)
+
+
+class BenchmarkResult:
+    """
+    The result of a benchmark run for a particular benchmark function, given
+    specific args.
+    """
+    def __init__(self, funcName, result, argNameValuePairs=None, unit=None):
+        self.name = funcName
+        self.argNameValuePairs = self.__sanitizeArgNameValues(argNameValuePairs)
+        self.result = result
+        self.unit = unit or "seconds"
+
+
+    def __sanitizeArgNameValues(self, argNameValuePairs):
+        if argNameValuePairs is None:
+            return []
+        return [(n, str(v if v is not None else "NaN")) for (n, v) in argNameValuePairs]
+
+
+    def __repr__(self):
+        return (f"{self.__class__.__name__}(funcName='{self.name}'"
+                f", result={repr(self.result)}"
+                f", argNameValuePairs={repr(self.argNameValuePairs)}"
+                f", unit='{self.unit}')")
+
+
+    def __eq__(self, other):
+        return (self.name == other.name) \
+            and (self.argNameValuePairs == other.argNameValuePairs) \
+            and (self.result == other.result) \
+            and (self.unit == other.unit)
 
 
 class ASVDb:
@@ -189,8 +189,8 @@ class ASVDb:
         try:
             self.__getLock(self.dbDir)
             if self.__waitForWrite():
-                # The comments below assume default dirname values, which can be
-                # changed in the asv.conf.json file.
+                # The comments below assume default dirname values (mainly
+                # "results"), which can be changed in the asv.conf.json file.
                 #
                 # <self.dbDir>/asv.conf.json
                 self.__updateConfFile()
@@ -237,18 +237,29 @@ class ASVDb:
 
     ###########################################################################
     # Private methods. These should not be called by clients. Among other
-    # things, public methods use proper locking to ensure atomic operations,
-    # these do not.
+    # things, public methods use proper locking to ensure atomic operations
+    # and these do not.
     ###########################################################################
     def __readResults(self, infoOnly=False, filterByInfoObjs=None):
-        # Iterate over each machine dir:
-        #   read machine.json
-        #   iterate over each result file:
-        #     create a BenchmarkInfo obj for each
+        """
+        Main "read" method responsible for reading ASV JSON files and creating
+        BenchmarkInfo and BenchmarkResult objs.
+
+        If infoOnly==True, returns a list of only BenchmarkInfo objs, otherwise
+        returns a list of tuples containing (BenchmarkInfo obj, [BenchmarkResult
+        obj, ...]) to represent each BenchmarkInfo object and all the
+        BenchmarkResult objs associated with it.
+
+        filterByInfoObjs can be set to only return BenchmarkInfo objs and their
+        results that match at least one of the BenchmarkInfo objs in the
+        filterByInfoObjs list (the list is treated as ORd).
+        """
         retList = []
 
         resultsPath = Path(self.resultsDirPath)
 
+        # benchmarks.json containes meta-data about the individual benchmarks,
+        # which is only needed for returning results.
         if not(infoOnly):
             benchmarksJsonFile = resultsPath / self.benchmarksFileName
             if benchmarksJsonFile.exists():
@@ -258,9 +269,14 @@ class ASVDb:
                 raise FileNotFoundError(f"{benchmarksJsonFile.as_posix()}")
 
         for machineDir in resultsPath.iterdir():
+            # Each subdir under the results dir contains all results for a
+            # individual machine. The only non-dir (file) that may need to be
+            # read in the results dir is benchmarks.json, which would have been
+            # read above.
             if machineDir.is_dir():
-                # Look for and read machine.json first
-                # Assume this is not a results dir if no machine file.
+                # Inside the individual machine dir, ;ook for and read
+                # machine.json first.  Assume this is not a valid results dir if
+                # no machine file and skip.
                 machineJsonFile = machineDir / self.machineFileName
                 if machineJsonFile.exists():
                     mDict = self.__loadJsonDictFromFile(
@@ -268,15 +284,18 @@ class ASVDb:
                 else :
                     continue
 
+                # Read each results file and populate the machineResults list.
+                # This will contain either BenchmarkInfo objs or tuples of
+                # (BenchmarkInfo, [BenchmarkResult objs, ...]) based on infoOnly
                 machineResults = []
-
                 for resultsFile in machineDir.iterdir():
                     if resultsFile == machineJsonFile:
                         continue
                     rDict = self.__loadJsonDictFromFile(resultsFile.as_posix())
 
                     resultsParams = rDict.get("params", {})
-
+                    # Each results file has a single BenchmarkInfo obj
+                    # describing it.
                     bi = BenchmarkInfo(
                         machineName=mDict.get("machine", ""),
                         cudaVer=resultsParams.get("cuda", ""),
@@ -290,10 +309,18 @@ class ASVDb:
                         ram=mDict.get("ram", "")
                     )
 
-                    if not(infoOnly):
+                    # If a filter was specified, at least one EXACT MATCH to the
+                    # BenchmarkInfo obj must be present.
+                    if filterByInfoObjs and not(bi in filterByInfoObjs):
+                        continue
+
+                    if infoOnly:
+                        machineResults.append(bi)
+                    else:
                         # FIXME: if results not in rDict, throw better error
                         resultsDict = rDict["results"]
-                        # list of result objs associated with the info obj
+                        # Populate the list of BenchmarkResult objs associated
+                        # with the BenchmarkInfo obj
                         resultObjs = []
                         for benchmarkName in resultsDict:
                             # benchmarkSpec is the entry in benchmarks.json,
@@ -306,7 +333,8 @@ class ASVDb:
                             paramNames = benchmarkSpec["param_names"]
                             paramValues = benchmarkResults["params"]
                             results = benchmarkResults["result"]
-
+                            # Inverse of the write operation described in
+                            # self.__updateResultJson()
                             paramsCartProd = list(itertools.product(*paramValues))
                             for (paramValueCombo, result) in zip(paramsCartProd, results):
                                 br = BenchmarkResult(
@@ -318,8 +346,6 @@ class ASVDb:
                                     br.unit = unit
                                 resultObjs.append(br)
                         machineResults.append((bi, resultObjs))
-                    else:
-                        machineResults.append(bi)
 
                 retList += machineResults
 

@@ -31,7 +31,7 @@ machineName = "my_machine"
 
 
 def createAndPopulateASVDb(dbDir):
-    from asvdb import ASVDb, BenchmarkInfo, BenchmarkResult
+    from asvdb import ASVDb, BenchmarkInfo
 
     db = ASVDb(dbDir, repo, [branch])
     bInfo = BenchmarkInfo(machineName=machineName,
@@ -44,6 +44,12 @@ def createAndPopulateASVDb(dbDir):
                           cpuType="x86_64",
                           arch="my_arch",
                           ram="123456")
+
+    return addResultsForInfo(db, bInfo)
+
+
+def addResultsForInfo(db, bInfo):
+    from asvdb import ASVDb, BenchmarkResult
 
     for (algoName, exeTime) in algoRunResults:
         bResult = BenchmarkResult(funcName=algoName,
@@ -228,3 +234,50 @@ def test_read():
     assert br.name == algoRunResults[0][0]
     assert br.argNameValuePairs == [("dataset", datasetName)]
     assert br.result == algoRunResults[0][1]
+
+
+def test_getFilteredResults():
+
+    from asvdb import ASVDb, BenchmarkInfo
+
+    tmpDir = tempfile.TemporaryDirectory()
+    asvDirName = path.join(tmpDir.name, "dir_that_did_not_exist_before")
+
+    db = ASVDb(asvDirName, repo, [branch])
+    bInfo1 = BenchmarkInfo(machineName=machineName,
+                           cudaVer="9.2",
+                           osType="linux",
+                           pythonVer="3.6",
+                           commitHash=commitHash,
+                           commitTime=commitTime)
+    bInfo2 = BenchmarkInfo(machineName=machineName,
+                           cudaVer="10.1",
+                           osType="linux",
+                           pythonVer="3.7",
+                           commitHash=commitHash,
+                           commitTime=commitTime)
+    bInfo3 = BenchmarkInfo(machineName=machineName,
+                           cudaVer="10.0",
+                           osType="linux",
+                           pythonVer="3.7",
+                           commitHash=commitHash,
+                           commitTime=commitTime)
+
+    addResultsForInfo(db, bInfo1)
+    addResultsForInfo(db, bInfo2)
+    addResultsForInfo(db, bInfo3)
+
+    # should only return results associated with bInfo1
+    brList1 = db.getResults(filterInfoObjList=[bInfo1])
+    assert len(brList1) == 1
+    assert brList1[0][0] == bInfo1
+    assert len(brList1[0][1]) == len(algoRunResults)
+
+    # should only return results associated with bInfo1 or bInfo3
+    brList1 = db.getResults(filterInfoObjList=[bInfo1, bInfo3])
+    assert len(brList1) == 2
+    assert brList1[0][0] in [bInfo1, bInfo3]
+    assert brList1[1][0] in [bInfo1, bInfo3]
+    assert brList1[0][0] != brList1[1][0]
+    assert len(brList1[0][1]) == len(algoRunResults)
+    assert len(brList1[1][1]) == len(algoRunResults)
