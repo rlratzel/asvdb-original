@@ -67,7 +67,6 @@ def test_addResult():
 
 
 def test_writeWithoutRepoSet():
-
     from asvdb import ASVDb
 
     tmpDir = tempfile.TemporaryDirectory()
@@ -79,7 +78,6 @@ def test_writeWithoutRepoSet():
 
 
 def test_asvDirDNE():
-
     from asvdb import ASVDb
 
     tmpDir = tempfile.TemporaryDirectory()
@@ -102,7 +100,6 @@ def test_asvDirDNE():
 
 
 def test_newBranch():
-
     from asvdb import ASVDb
 
     asvDir = tempfile.TemporaryDirectory()
@@ -126,7 +123,6 @@ def test_newBranch():
 
 
 def test_gitExtension():
-
     from asvdb import ASVDb
 
     asvDir = tempfile.TemporaryDirectory()
@@ -147,7 +143,6 @@ def test_gitExtension():
 
 
 def test_concurrency():
-
     from asvdb import ASVDb, BenchmarkInfo, BenchmarkResult
 
     tmpDir = tempfile.TemporaryDirectory()
@@ -201,8 +196,51 @@ def test_concurrency():
     tmpDir.cleanup()
 
 
-def test_read():
+def test_concurrency_stress():
+    from asvdb import ASVDb, BenchmarkInfo, BenchmarkResult
 
+    tmpDir = tempfile.TemporaryDirectory()
+    asvDirName = path.join(tmpDir.name, "dir_that_does_not_exist")
+    repo = "somerepo"
+    branch1 = "branch1"
+    num = 32
+    dbs = []
+    threads = []
+    allFuncNames = []
+
+    bInfo = BenchmarkInfo(machineName=machineName)
+
+    for i in range(num):
+        db = ASVDb(asvDirName, repo, [branch1])
+        db.writeDelay=0.5
+        dbs.append(db)
+
+        funcName = f"somebenchmark{i}"
+        bResult = BenchmarkResult(funcName=funcName, result=43)
+        allFuncNames.append(funcName)
+
+        t = threading.Thread(target=db.addResult, args=(bInfo, bResult))
+        threads.append(t)
+
+    for i in range(num):
+        threads[i].start()
+
+    for i in range(num):
+        threads[i].join()
+
+    # There should be num unique results in the db after (re)reading.  Pick any
+    # of the db instances to read, they should all see the same results.
+    results = dbs[0].getResults()
+    assert len(results[0][1]) == num
+
+    # Simply check that all unique func names were read back in.
+    allFuncNamesCheck = [r.name for r in results[0][1]]
+    assert sorted(allFuncNames) == sorted(allFuncNamesCheck)
+
+    tmpDir.cleanup()
+
+
+def test_read():
     from asvdb import ASVDb
 
     tmpDir = tempfile.TemporaryDirectory()
@@ -237,7 +275,6 @@ def test_read():
 
 
 def test_getFilteredResults():
-
     from asvdb import ASVDb, BenchmarkInfo
 
     tmpDir = tempfile.TemporaryDirectory()

@@ -39,7 +39,7 @@ class BenchmarkInfo:
                 f", gpuType='{self.gpuType}'"
                 f", cpuType='{self.cpuType}'"
                 f", arch='{self.arch}'"
-                f", ram={self.ram})")
+                f", ram={repr(self.ram)})")
 
 
     def __eq__(self, other):
@@ -325,6 +325,14 @@ class ASVDb:
                         for benchmarkName in resultsDict:
                             # benchmarkSpec is the entry in benchmarks.json,
                             # which is needed for the param names
+                            if benchmarkName not in bDict:
+                                print("WARNING: Encountered benchmark name "
+                                      "that is not in "
+                                      f"{self.benchmarksFileName}: "
+                                      f"file: {resultsFile.as_posix()} "
+                                      f"invalid name\"{benchmarkName}\", skipping.")
+                                continue
+
                             benchmarkSpec = bDict[benchmarkName]
                             # benchmarkResults is the entry in this particular
                             # result file for this benchmark
@@ -341,7 +349,7 @@ class ASVDb:
                                     funcName=benchmarkName,
                                     argNameValuePairs=zip(paramNames, paramValueCombo),
                                     result=result)
-                                unit = benchmarkResults.get("unit")
+                                unit = benchmarkSpec.get("unit")
                                 if unit is not None:
                                     br.unit = unit
                                 resultObjs.append(br)
