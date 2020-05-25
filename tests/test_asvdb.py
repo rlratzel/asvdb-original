@@ -23,38 +23,76 @@ algoRunResults = [('loadDataFile', 3.2228727098554373),
                   ('view_adj_list', 3.000927431508898735),
                   ('degree', 3.0016251634806394577),
                   ('degrees', None)]
+repo = "myrepo"
+branch = "my_branch"
+commitHash = "809a1569e8a2ff138cdde4d9c282328be9dcad43"
+commitTime = 1590007324
+machineName = "my_machine"
 
 
-@pytest.mark.skip(reason="Not written yet")
-def test_addResult():
-    """
-    FIXME: This is not a test yet, use example code below to create 1 or more tests
-    """
-    return
+def createAndPopulateASVDb(dbDir):
+    from asvdb import ASVDb, BenchmarkInfo, BenchmarkResult
 
-    (commitHash, commitTime) = getCommitInfo()
-    (repo, branch) = getRepoInfo()
-
-    db = ASVDb(asvDir, repo, [branch])
-
-    uname = platform.uname()
-
-    bInfo = BenchmarkInfo(machineName=machineName or uname.machine,
-                          cudaVer=cudaVer or "n/a",
-                          osType=osType or "%s %s" % (uname.system, uname.release),
-                          pythonVer=pythonVer or platform.python_version(),
+    db = ASVDb(dbDir, repo, [branch])
+    bInfo = BenchmarkInfo(machineName=machineName,
+                          cudaVer="9.2",
+                          osType="linux",
+                          pythonVer="3.6",
                           commitHash=commitHash,
                           commitTime=commitTime,
                           gpuType="n/a",
-                          cpuType=uname.processor,
-                          arch=uname.machine,
-                          ram="%d" % psutil.virtual_memory().total)
+                          cpuType="x86_64",
+                          arch="my_arch",
+                          ram="123456")
 
     for (algoName, exeTime) in algoRunResults:
         bResult = BenchmarkResult(funcName=algoName,
                                   argNameValuePairs=[("dataset", datasetName)],
                                   result=exeTime)
         db.addResult(bInfo, bResult)
+
+    return db
+
+
+def test_addResult():
+    asvDir = tempfile.TemporaryDirectory()
+    db = createAndPopulateASVDb(asvDir.name)
+    asvDir.cleanup()
+
+
+def test_writeWithoutRepoSet():
+
+    from asvdb import ASVDb
+
+    tmpDir = tempfile.TemporaryDirectory()
+    asvDirName = path.join(tmpDir.name, "dir_that_does_not_exist")
+
+    db1 = ASVDb(asvDirName)
+    with pytest.raises(AttributeError):
+        db1.updateConfFile()
+
+
+def test_asvDirDNE():
+
+    from asvdb import ASVDb
+
+    tmpDir = tempfile.TemporaryDirectory()
+    asvDirName = path.join(tmpDir.name, "dir_that_does_not_exist")
+    repo = "somerepo"
+    branch1 = "branch1"
+
+    db1 = ASVDb(asvDirName, repo, [branch1])
+    db1.updateConfFile()
+
+    confFile = path.join(asvDirName, "asv.conf.json")
+    with open(confFile) as fobj:
+        j = json.load(fobj)
+        branches = j["branches"]
+
+    assert branches == [branch1]
+
+    tmpDir.cleanup()
+
 
 
 def test_newBranch():
@@ -106,13 +144,14 @@ def test_concurrency():
 
     from asvdb import ASVDb, BenchmarkInfo, BenchmarkResult
 
-    asvDir = tempfile.TemporaryDirectory()
+    tmpDir = tempfile.TemporaryDirectory()
+    asvDirName = path.join(tmpDir.name, "dir_that_does_not_exist")
     repo = "somerepo"
     branch1 = "branch1"
 
-    db1 = ASVDb(asvDir.name, repo, [branch1])
-    db2 = ASVDb(asvDir.name, repo, [branch1])
-    db3 = ASVDb(asvDir.name, repo, [branch1])
+    db1 = ASVDb(asvDirName, repo, [branch1])
+    db2 = ASVDb(asvDirName, repo, [branch1])
+    db3 = ASVDb(asvDirName, repo, [branch1])
     # Use the writeDelay member var to insert a delay during write to properly
     # test collisions by making writes slow.
     db1.writeDelay = 10
@@ -148,9 +187,44 @@ def test_concurrency():
     t3.join()
 
     # Check that db3 wrote its result
-    with open(path.join(asvDir.name, "results", "benchmarks.json")) as fobj:
+    with open(path.join(asvDirName, "results", "benchmarks.json")) as fobj:
         jo = json.load(fobj)
         assert "somebenchmark3" in jo
         #print(jo)
 
-    asvDir.cleanup()
+    tmpDir.cleanup()
+
+
+def test_read():
+
+    from asvdb import ASVDb
+
+    tmpDir = tempfile.TemporaryDirectory()
+    asvDirName = path.join(tmpDir.name, "dir_that_did_not_exist_before")
+    createAndPopulateASVDb(asvDirName)
+
+    db1 = ASVDb(asvDirName)
+    db1.loadConfFile()
+    # asvdb always ensures repos end in .git
+    assert db1.repo == f"{repo}.git"
+    assert db1.branches == [branch]
+
+    # getInfo() returns a list of BenchmarkInfo objs
+    biList = db1.getInfo()
+    assert len(biList) == 1
+    bi = biList[0]
+    assert bi.machineName == machineName
+    assert bi.commitHash == commitHash
+    assert bi.commitTime == commitTime
+
+    # getResults() returns a list of tuples:
+    # (BenchmarkInfo obj, [BenchmarkResult obj, ...])
+    brList = db1.getResults()
+    assert len(brList) == len(biList)
+    assert brList[0][0] == bi
+    results = brList[0][1]
+    assert len(results) == len(algoRunResults)
+    br = results[0]
+    assert br.name == algoRunResults[0][0]
+    assert br.argNameValuePairs == [("dataset", datasetName)]
+    assert br.result == algoRunResults[0][1]

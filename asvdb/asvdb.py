@@ -1,6 +1,7 @@
 import json
 import os
 from os import path
+from pathlib import Path
 import itertools
 import glob
 import time
@@ -13,16 +14,31 @@ class BenchmarkResult:
     The result of a benchmark run for a particular benchmark function, given
     specific args.
     """
-    def __init__(self, funcName, result, argNameValuePairs=None):
+    def __init__(self, funcName, result, argNameValuePairs=None, unit=None):
         self.name = funcName
         self.argNameValuePairs = self.__sanitizeArgNameValues(argNameValuePairs)
         self.result = result
-        self.unit = "seconds"
+        self.unit = unit or "seconds"
+
 
     def __sanitizeArgNameValues(self, argNameValuePairs):
         if argNameValuePairs is None:
             return []
         return [(n, str(v if v is not None else "NaN")) for (n, v) in argNameValuePairs]
+
+
+    def __repr__(self):
+        return (f"{self.__class__.__name__}(funcName='{self.name}'"
+                f", result={repr(self.result)}"
+                f", argNameValuePairs={repr(self.argNameValuePairs)}"
+                f", unit='{self.unit}')")
+
+
+    def __eq__(self, other):
+        return (self.name == other.name) \
+            and (self.argNameValuePairs == other.argNameValuePairs) \
+            and (self.result == other.result) \
+            and (self.unit == other.unit)
 
 
 class BenchmarkInfo:
@@ -45,6 +61,32 @@ class BenchmarkInfo:
         self.ram = ram
 
 
+    def __repr__(self):
+        return (f"{self.__class__.__name__}(machineName='{self.machineName}'"
+                f", cudaVer='{self.cudaVer}'"
+                f", osType='{self.osType}'"
+                f", pythonVer='{self.pythonVer}'"
+                f", commitHash='{self.commitHash}'"
+                f", commitTime={self.commitTime}"
+                f", gpuType='{self.gpuType}'"
+                f", cpuType='{self.cpuType}'"
+                f", arch='{self.arch}'"
+                f", ram={self.ram})")
+
+
+    def __eq__(self, other):
+        return (self.machineName == other.machineName) \
+            and (self.cudaVer == other.cudaVer) \
+            and (self.osType == other.osType) \
+            and (self.pythonVer == other.pythonVer) \
+            and (self.commitHash == other.commitHash) \
+            and (self.commitTime == other.commitTime) \
+            and (self.gpuType == other.gpuType) \
+            and (self.cpuType == other.cpuType) \
+            and (self.arch == other.arch) \
+            and (self.ram == other.ram)
+
+
 class ASVDb:
     """
     A "database" of benchmark results consumable by ASV.
@@ -58,25 +100,33 @@ class ASVDb:
     machineFileName = "machine.json"
     lockfilePrefix = ".asvdbLOCK"
 
-    def __init__(self, dbDir, repo, branches=None, projectName=None, commitUrl=None):
+    def __init__(self, dbDir, repo=None, branches=None, projectName=None, commitUrl=None):
         """
-        dbDir -
-        repo -
+        dbDir - directory containing the ASV results, config file, etc.
+        repo - the repo associated with all reasults in the DB.
         branches - https://asv.readthedocs.io/en/stable/asv.conf.json.html#branches
+        projectName - the name of the project to display in ASV reports
+        commitUrl - the URL ASV will use in reports to redirect users to when
+                    they click on a data point. This is typically a Github
+                    project URL that shows the contents of a commit.
         """
         self.dbDir = dbDir
         self.repo = repo
         self.branches = branches
         self.projectName = projectName
         self.commitUrl = commitUrl
+
         self.confFilePath = path.join(self.dbDir, self.confFileName)
+        self.confVersion = self.defaultConfVersion
+        self.resultsDirName = self.defaultResultsDirName
+        self.resultsDirPath = path.join(self.dbDir, self.resultsDirName)
+        self.htmlDirName = self.defaultHtmlDirName
+        self.benchmarksFilePath = path.join(self.resultsDirPath, self.benchmarksFileName)
 
         # Each ASVDb instance must have a unique lockfile name to identify other
         # instances that may be setting locks.
         self.lockfileName = "%s-%s-%s" % (self.lockfilePrefix, os.getpid(), time.time())
         self.lockfileTimeout = 5  # seconds
-
-        self.__confFileUpdated = False
 
         ########################################
         # Testing and debug members
@@ -84,55 +134,234 @@ class ASVDb:
         # adds a delay during write operations to easily test write collision
         # handling.
         self.writeDelay = 0
-        # To "cancel" write operations that are paused
+        # To "cancel" write operations that are being delayed.
         self.cancelWrite = False
 
+
+    ###########################################################################
+    # Public API
+    ###########################################################################
+    def loadConfFile(self):
+        """
+        Read the ASV conf file on disk and set - or possibly overwrite - the
+        member variables with the contents of the file.
+        """
+        self.__assertDbDirExists()
+        try:
+            self.__getLock(self.dbDir)
+            # FIXME: check if confFile exists
+            d = self.__loadJsonDictFromFile(self.confFilePath)
+            self.resultsDirName = d.get("results_dir", self.resultsDirName)
+            self.resultsDirPath = path.join(self.dbDir, self.resultsDirName)
+            self.benchmarksFilePath = path.join(self.resultsDirPath, self.benchmarksFileName)
+            self.htmlDirName = d.get("html_dir", self.htmlDirName)
+            self.repo = d.get("repo")
+            self.branches = d.get("branches", [])
+            self.projectName = d.get("project")
+            self.commitUrl = d.get("show_commit_url")
+
+        finally:
+            self.__releaseLock(self.dbDir)
 
 
     def updateConfFile(self):
         """
-        Update the ASV conf file with the values passed in to the CTOR, if not
-        done already from a previous write operation.
+        Update the ASV conf file with the values passed in to the CTOR. This
+        also ensures the object is up-to-date with any changes to the conf file
+        that may have been done by other ASVDb instances.
         """
-        self.__getLock(self.dbDir)
-        if self.__waitForWrite():
-            self.__ensureConfFileUpdated()
-        self.__releaseLock(self.dbDir)
+        self.__ensureDbDirExists()
+        try:
+            self.__getLock(self.dbDir)
+            if self.__waitForWrite():
+                self.__updateConfFile()
+        finally:
+            self.__releaseLock(self.dbDir)
 
 
     def addResult(self, benchmarkInfo, benchmarkResult):
-        self.__getLock(self.dbDir)
-        if self.__waitForWrite():
-            self.__ensureConfFileUpdated()
-            self.__updateBenchmarkJson(benchmarkResult)
-            self.__updateMachineJson(benchmarkInfo)
-            self.__updateResultJson(benchmarkResult, benchmarkInfo)
-        self.__releaseLock(self.dbDir)
+        """
+        Add the benchmarkResult associated with the benchmarkInfo to the DB.
+        This will also update the conf file with the CTOR args if not done
+        already.
+        """
+        self.__ensureDbDirExists()
+        try:
+            self.__getLock(self.dbDir)
+            if self.__waitForWrite():
+                # The comments below assume default dirname values, which can be
+                # changed in the asv.conf.json file.
+                #
+                # <self.dbDir>/asv.conf.json
+                self.__updateConfFile()
+                # <self.dbDir>/results/benchmarks.json
+                self.__updateBenchmarkJson(benchmarkResult)
+                # <self.dbDir>/results/<machine dir>/machine.json
+                self.__updateMachineJson(benchmarkInfo)
+                # <self.dbDir>/results/<machine dir>/<result file name>.json
+                self.__updateResultJson(benchmarkResult, benchmarkInfo)
+        finally:
+            self.__releaseLock(self.dbDir)
 
 
-    def __ensureConfFileUpdated(self):
-        if not(self.__confFileUpdated):
-            d = self.__loadJsonDictFromFile(self.confFilePath)
-            self.confVersion = self.defaultConfVersion
-            self.resultsDirName = d.setdefault("results_dir", self.defaultResultsDirName)
-            self.resultsDirPath = path.join(self.dbDir, self.resultsDirName)
-            self.htmlDirName = d.setdefault("html_dir", self.defaultHtmlDirName)
-            self.benchmarksFilePath = path.join(self.resultsDirPath, self.benchmarksFileName)
+    def getInfo(self):
+        """
+        Return a list of BenchmarkInfo objs from reading the db files on disk.
+        """
+        self.__assertDbDirExists()
+        try:
+            self.__getLock(self.dbDir)
+            retList = self.__readResults(infoOnly=True)
+        finally:
+            self.__releaseLock(self.dbDir)
 
-            # ASVDb is git-only for now, so ensure .git extension
-            d["repo"] = self.repo + (".git" if not self.repo.endswith(".git") else "")
-            currentBranches = d.get("branches", [])
-            d["branches"] = currentBranches + [b for b in (self.branches or []) if b not in currentBranches]
-            d["version"] = 1
-            d["project"] = self.projectName or self.repo.replace(".git", "").split("/")[-1]
-            d["show_commit_url"] = self.commitUrl or \
-                                   (self.repo.replace(".git", "") \
-                                    + ("/" if not self.repo.endswith("/") else "") \
-                                    + "commit/")
+        return retList
 
-            self.__writeJsonDictToFile(d, self.confFilePath)
 
-            self.__confFileUpdated = True
+    def getResults(self, filterInfoObjList=None):
+        """
+        Return a list of (BenchmarkInfo obj, [BenchmarkResult obj, ...]) tuples
+        from reading the db files on disk.  filterInfoObjList is expected to be
+        a list of BenchmarkInfo objs, and if provided will be used to return
+        results for only those BenchmarkInfo objs.
+        """
+        self.__assertDbDirExists()
+        try:
+            self.__getLock(self.dbDir)
+            retList = self.__readResults(filterByInfoObjs=filterInfoObjList)
+        finally:
+            self.__releaseLock(self.dbDir)
+
+        return retList
+
+
+    ###########################################################################
+    # Private methods. These should not be called by clients. Among other
+    # things, public methods use proper locking to ensure atomic operations,
+    # these do not.
+    ###########################################################################
+    def __readResults(self, infoOnly=False, filterByInfoObjs=None):
+        # Iterate over each machine dir:
+        #   read machine.json
+        #   iterate over each result file:
+        #     create a BenchmarkInfo obj for each
+        retList = []
+
+        resultsPath = Path(self.resultsDirPath)
+
+        if not(infoOnly):
+            benchmarksJsonFile = resultsPath / self.benchmarksFileName
+            if benchmarksJsonFile.exists():
+                bDict = self.__loadJsonDictFromFile(benchmarksJsonFile.as_posix())
+            else:
+                # FIXME: test
+                raise FileNotFoundError(f"{benchmarksJsonFile.as_posix()}")
+
+        for machineDir in resultsPath.iterdir():
+            if machineDir.is_dir():
+                # Look for and read machine.json first
+                # Assume this is not a results dir if no machine file.
+                machineJsonFile = machineDir / self.machineFileName
+                if machineJsonFile.exists():
+                    mDict = self.__loadJsonDictFromFile(
+                        machineJsonFile.as_posix())
+                else :
+                    continue
+
+                machineResults = []
+
+                for resultsFile in machineDir.iterdir():
+                    if resultsFile == machineJsonFile:
+                        continue
+                    rDict = self.__loadJsonDictFromFile(resultsFile.as_posix())
+
+                    resultsParams = rDict.get("params", {})
+
+                    bi = BenchmarkInfo(
+                        machineName=mDict.get("machine", ""),
+                        cudaVer=resultsParams.get("cuda", ""),
+                        osType=resultsParams.get("os", ""),
+                        pythonVer=resultsParams.get("python", ""),
+                        commitHash=rDict.get("commit_hash", ""),
+                        commitTime=rDict.get("date", ""),
+                        gpuType=mDict.get("gpu", ""),
+                        cpuType=mDict.get("cpu", ""),
+                        arch=mDict.get("arch", ""),
+                        ram=mDict.get("ram", "")
+                    )
+
+                    if not(infoOnly):
+                        # FIXME: if results not in rDict, throw better error
+                        resultsDict = rDict["results"]
+                        # list of result objs associated with the info obj
+                        resultObjs = []
+                        for benchmarkName in resultsDict:
+                            # benchmarkSpec is the entry in benchmarks.json,
+                            # which is needed for the param names
+                            benchmarkSpec = bDict[benchmarkName]
+                            # benchmarkResults is the entry in this particular
+                            # result file for this benchmark
+                            benchmarkResults = resultsDict[benchmarkName]
+
+                            paramNames = benchmarkSpec["param_names"]
+                            paramValues = benchmarkResults["params"]
+                            results = benchmarkResults["result"]
+
+                            paramsCartProd = list(itertools.product(*paramValues))
+                            for (paramValueCombo, result) in zip(paramsCartProd, results):
+                                br = BenchmarkResult(
+                                    funcName=benchmarkName,
+                                    argNameValuePairs=zip(paramNames, paramValueCombo),
+                                    result=result)
+                                unit = benchmarkResults.get("unit")
+                                if unit is not None:
+                                    br.unit = unit
+                                resultObjs.append(br)
+                        machineResults.append((bi, resultObjs))
+                    else:
+                        machineResults.append(bi)
+
+                retList += machineResults
+
+        return retList
+
+
+    def __assertDbDirExists(self):
+        if not(path.isdir(self.dbDir)):
+            raise FileNotFoundError(f"{self.dbDir} does not exist or is not a "
+                                    "directory")
+
+
+    def __ensureDbDirExists(self):
+        if not(path.exists(self.dbDir)):
+            os.mkdir(self.dbDir)
+            # Hack: os.mkdir() seems to return before the filesystem catches up,
+            # so pause before returning to help ensure the dir actually exists
+            time.sleep(0.1)
+
+
+    def __updateConfFile(self):
+        """
+        Update the conf file with the settings in this ASVDb instance.
+        """
+        if self.repo is None:
+            raise AttributeError("repo must be set to non-None before "
+                                 f"writing {self.confFilePath}")
+
+        d = self.__loadJsonDictFromFile(self.confFilePath)
+        # ASVDb is git-only for now, so ensure .git extension
+        d["repo"] = self.repo + (".git" if not self.repo.endswith(".git") else "")
+        currentBranches = d.get("branches", [])
+        d["branches"] = currentBranches + [b for b in (self.branches or []) if b not in currentBranches]
+        d["version"] = self.confVersion
+        d["project"] = self.projectName or self.repo.replace(".git", "").split("/")[-1]
+        d["show_commit_url"] = self.commitUrl or \
+                               (self.repo.replace(".git", "") \
+                                + ("/" if not self.repo.endswith("/") else "") \
+                                + "commit/")
+
+        self.__writeJsonDictToFile(d, self.confFilePath)
+
 
 
     def __updateBenchmarkJson(self, benchmarkResult):
@@ -371,7 +600,6 @@ class ASVDb:
 
 
     def __loadJsonDictFromFile(self, jsonFile):
-
         """
         Return a dictionary representing the contents of jsonFile by
         either reading in the existing file or returning {}
