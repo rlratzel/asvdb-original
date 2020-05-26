@@ -2,11 +2,24 @@
 
 Python interface to a ASV "database", as described [here](https://asv.readthedocs.io/en/stable/dev.html?highlight=%24results_dir#benchmark-suite-layout-and-file-formats).
 
-NOTE: This is currently a "write-only" interface.
+## Examples:
 
-Example:
+### Read results from the "database"
+```
+import asvdb
 
-Add benchmark results to the "database"
+db = asvdb.ASVDb("/path/to/benchmarks/asv")
+
+# Get a list of (BenchmarkInfo obj, [BenchmarkResult obj, ...]) tuples.
+#
+# A BenchmarkInfo obj contins meta-data about a benchmark run, including the
+# mahine name, OS type, commit hash, commit time, etc.  A BenchmarkResult obj
+# contains the individual result for a particular benchmarked function with
+# specific arg values.
+results = db.getResults()
+```
+
+### Add benchmark results to the "database"
 ```
 import platform
 import psutil
