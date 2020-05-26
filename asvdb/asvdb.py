@@ -1,30 +1,20 @@
 import json
 import os
 from os import path
-import fcntl
+from pathlib import Path
 import itertools
-
-
-class BenchmarkResult:
-    """
-    The result of a benchmark run for a particular benchmark function, given
-    specific args.
-    """
-    def __init__(self, funcName, argNameValuePairs, result):
-        self.name = funcName
-        self.argNameValuePairs = self.__sanitizeArgNameValues(argNameValuePairs)
-        self.result = result
-        self.unit = "seconds"
-
-    def __sanitizeArgNameValues(self, argNameValuePairs):
-        return [(n, str(v if v is not None else "NaN")) for (n, v) in argNameValuePairs]
+import glob
+import time
+import random
+import stat
 
 
 class BenchmarkInfo:
     """
     Meta-data describing the environment for a benchmark or set of benchmarks.
     """
-    def __init__(self, machineName, cudaVer, osType, pythonVer, commitHash, commitTime,
+    def __init__(self, machineName="", cudaVer="", osType="", pythonVer="",
+                 commitHash="", commitTime=0,
                  gpuType="", cpuType="", arch="", ram=""):
         self.machineName = machineName
         self.cudaVer = cudaVer
@@ -39,6 +29,64 @@ class BenchmarkInfo:
         self.ram = ram
 
 
+    def __repr__(self):
+        return (f"{self.__class__.__name__}(machineName='{self.machineName}'"
+                f", cudaVer='{self.cudaVer}'"
+                f", osType='{self.osType}'"
+                f", pythonVer='{self.pythonVer}'"
+                f", commitHash='{self.commitHash}'"
+                f", commitTime={self.commitTime}"
+                f", gpuType='{self.gpuType}'"
+                f", cpuType='{self.cpuType}'"
+                f", arch='{self.arch}'"
+                f", ram={repr(self.ram)})")
+
+
+    def __eq__(self, other):
+        return (self.machineName == other.machineName) \
+            and (self.cudaVer == other.cudaVer) \
+            and (self.osType == other.osType) \
+            and (self.pythonVer == other.pythonVer) \
+            and (self.commitHash == other.commitHash) \
+            and (self.commitTime == other.commitTime) \
+            and (self.gpuType == other.gpuType) \
+            and (self.cpuType == other.cpuType) \
+            and (self.arch == other.arch) \
+            and (self.ram == other.ram)
+
+
+class BenchmarkResult:
+    """
+    The result of a benchmark run for a particular benchmark function, given
+    specific args.
+    """
+    def __init__(self, funcName, result, argNameValuePairs=None, unit=None):
+        self.name = funcName
+        self.argNameValuePairs = self.__sanitizeArgNameValues(argNameValuePairs)
+        self.result = result
+        self.unit = unit or "seconds"
+
+
+    def __sanitizeArgNameValues(self, argNameValuePairs):
+        if argNameValuePairs is None:
+            return []
+        return [(n, str(v if v is not None else "NaN")) for (n, v) in argNameValuePairs]
+
+
+    def __repr__(self):
+        return (f"{self.__class__.__name__}(funcName='{self.name}'"
+                f", result={repr(self.result)}"
+                f", argNameValuePairs={repr(self.argNameValuePairs)}"
+                f", unit='{self.unit}')")
+
+
+    def __eq__(self, other):
+        return (self.name == other.name) \
+            and (self.argNameValuePairs == other.argNameValuePairs) \
+            and (self.result == other.result) \
+            and (self.unit == other.unit)
+
+
 class ASVDb:
     """
     A "database" of benchmark results consumable by ASV.
@@ -50,43 +98,304 @@ class ASVDb:
     defaultConfVersion = 1
     benchmarksFileName = "benchmarks.json"
     machineFileName = "machine.json"
+    lockfilePrefix = ".asvdbLOCK"
 
-    def __init__(self, dbDir, repo, branches=None, projectName=None, commitUrl=None):
+    def __init__(self, dbDir, repo=None, branches=None, projectName=None, commitUrl=None):
         """
-        dbDir -
-        repo -
+        dbDir - directory containing the ASV results, config file, etc.
+        repo - the repo associated with all reasults in the DB.
         branches - https://asv.readthedocs.io/en/stable/asv.conf.json.html#branches
+        projectName - the name of the project to display in ASV reports
+        commitUrl - the URL ASV will use in reports to redirect users to when
+                    they click on a data point. This is typically a Github
+                    project URL that shows the contents of a commit.
         """
         self.dbDir = dbDir
-        self.confFilePath = path.join(self.dbDir, self.confFileName)
-        d = self.__loadJsonDictFromFile(self.confFilePath)
+        self.repo = repo
+        self.branches = branches
+        self.projectName = projectName
+        self.commitUrl = commitUrl
 
+        self.confFilePath = path.join(self.dbDir, self.confFileName)
         self.confVersion = self.defaultConfVersion
-        self.resultsDirName = d.setdefault("results_dir", self.defaultResultsDirName)
-        self.resultsDirPath = path.join(dbDir, self.resultsDirName)
-        self.htmlDirName = d.setdefault("html_dir", self.defaultHtmlDirName)
+        self.resultsDirName = self.defaultResultsDirName
+        self.resultsDirPath = path.join(self.dbDir, self.resultsDirName)
+        self.htmlDirName = self.defaultHtmlDirName
         self.benchmarksFilePath = path.join(self.resultsDirPath, self.benchmarksFileName)
 
-        # ASVDb is git-only for now, so ensure .git extension
-        d["repo"] = repo + (".git" if not repo.endswith(".git") else "")
-        currentBranches = d.get("branches", [])
-        d["branches"] = currentBranches + [b for b in (branches or []) if b not in currentBranches]
-        d["version"] = 1
-        d["project"] = projectName or repo.replace(".git", "").split("/")[-1]
-        d["show_commit_url"] = commitUrl or \
-                               (repo.replace(".git", "") \
-                                + ("/" if not repo.endswith("/") else "") \
-                                + "commit/")
+        # Each ASVDb instance must have a unique lockfile name to identify other
+        # instances that may be setting locks.
+        self.lockfileName = "%s-%s-%s" % (self.lockfilePrefix, os.getpid(), time.time())
+        self.lockfileTimeout = 5  # seconds
 
-        # FIXME: consider a separate method for writing this file, ctor may not
-        # be appropriate
-        self.__writeJsonDictToFile(d, self.confFilePath)
+        ########################################
+        # Testing and debug members
+        self.debugPrint = False
+        # adds a delay during write operations to easily test write collision
+        # handling.
+        self.writeDelay = 0
+        # To "cancel" write operations that are being delayed.
+        self.cancelWrite = False
+
+
+    ###########################################################################
+    # Public API
+    ###########################################################################
+    def loadConfFile(self):
+        """
+        Read the ASV conf file on disk and set - or possibly overwrite - the
+        member variables with the contents of the file.
+        """
+        self.__assertDbDirExists()
+        try:
+            self.__getLock(self.dbDir)
+            # FIXME: check if confFile exists
+            d = self.__loadJsonDictFromFile(self.confFilePath)
+            self.resultsDirName = d.get("results_dir", self.resultsDirName)
+            self.resultsDirPath = path.join(self.dbDir, self.resultsDirName)
+            self.benchmarksFilePath = path.join(self.resultsDirPath, self.benchmarksFileName)
+            self.htmlDirName = d.get("html_dir", self.htmlDirName)
+            self.repo = d.get("repo")
+            self.branches = d.get("branches", [])
+            self.projectName = d.get("project")
+            self.commitUrl = d.get("show_commit_url")
+
+        finally:
+            self.__releaseLock(self.dbDir)
+
+
+    def updateConfFile(self):
+        """
+        Update the ASV conf file with the values passed in to the CTOR. This
+        also ensures the object is up-to-date with any changes to the conf file
+        that may have been done by other ASVDb instances.
+        """
+        self.__ensureDbDirExists()
+        try:
+            self.__getLock(self.dbDir)
+            if self.__waitForWrite():
+                self.__updateConfFile()
+        finally:
+            self.__releaseLock(self.dbDir)
 
 
     def addResult(self, benchmarkInfo, benchmarkResult):
-        self.__updateBenchmarkJson(benchmarkResult)
-        self.__updateMachineJson(benchmarkInfo)
-        self.__updateResultJson(benchmarkResult, benchmarkInfo)
+        """
+        Add the benchmarkResult associated with the benchmarkInfo to the DB.
+        This will also update the conf file with the CTOR args if not done
+        already.
+        """
+        self.__ensureDbDirExists()
+        try:
+            self.__getLock(self.dbDir)
+            if self.__waitForWrite():
+                # The comments below assume default dirname values (mainly
+                # "results"), which can be changed in the asv.conf.json file.
+                #
+                # <self.dbDir>/asv.conf.json
+                self.__updateConfFile()
+                # <self.dbDir>/results/benchmarks.json
+                self.__updateBenchmarkJson(benchmarkResult)
+                # <self.dbDir>/results/<machine dir>/machine.json
+                self.__updateMachineJson(benchmarkInfo)
+                # <self.dbDir>/results/<machine dir>/<result file name>.json
+                self.__updateResultJson(benchmarkResult, benchmarkInfo)
+        finally:
+            self.__releaseLock(self.dbDir)
+
+
+    def getInfo(self):
+        """
+        Return a list of BenchmarkInfo objs from reading the db files on disk.
+        """
+        self.__assertDbDirExists()
+        try:
+            self.__getLock(self.dbDir)
+            retList = self.__readResults(infoOnly=True)
+        finally:
+            self.__releaseLock(self.dbDir)
+
+        return retList
+
+
+    def getResults(self, filterInfoObjList=None):
+        """
+        Return a list of (BenchmarkInfo obj, [BenchmarkResult obj, ...]) tuples
+        from reading the db files on disk.  filterInfoObjList is expected to be
+        a list of BenchmarkInfo objs, and if provided will be used to return
+        results for only those BenchmarkInfo objs.
+        """
+        self.__assertDbDirExists()
+        try:
+            self.__getLock(self.dbDir)
+            retList = self.__readResults(filterByInfoObjs=filterInfoObjList)
+        finally:
+            self.__releaseLock(self.dbDir)
+
+        return retList
+
+
+    ###########################################################################
+    # Private methods. These should not be called by clients. Among other
+    # things, public methods use proper locking to ensure atomic operations
+    # and these do not.
+    ###########################################################################
+    def __readResults(self, infoOnly=False, filterByInfoObjs=None):
+        """
+        Main "read" method responsible for reading ASV JSON files and creating
+        BenchmarkInfo and BenchmarkResult objs.
+
+        If infoOnly==True, returns a list of only BenchmarkInfo objs, otherwise
+        returns a list of tuples containing (BenchmarkInfo obj, [BenchmarkResult
+        obj, ...]) to represent each BenchmarkInfo object and all the
+        BenchmarkResult objs associated with it.
+
+        filterByInfoObjs can be set to only return BenchmarkInfo objs and their
+        results that match at least one of the BenchmarkInfo objs in the
+        filterByInfoObjs list (the list is treated as ORd).
+        """
+        retList = []
+
+        resultsPath = Path(self.resultsDirPath)
+
+        # benchmarks.json containes meta-data about the individual benchmarks,
+        # which is only needed for returning results.
+        if not(infoOnly):
+            benchmarksJsonFile = resultsPath / self.benchmarksFileName
+            if benchmarksJsonFile.exists():
+                bDict = self.__loadJsonDictFromFile(benchmarksJsonFile.as_posix())
+            else:
+                # FIXME: test
+                raise FileNotFoundError(f"{benchmarksJsonFile.as_posix()}")
+
+        for machineDir in resultsPath.iterdir():
+            # Each subdir under the results dir contains all results for a
+            # individual machine. The only non-dir (file) that may need to be
+            # read in the results dir is benchmarks.json, which would have been
+            # read above.
+            if machineDir.is_dir():
+                # Inside the individual machine dir, ;ook for and read
+                # machine.json first.  Assume this is not a valid results dir if
+                # no machine file and skip.
+                machineJsonFile = machineDir / self.machineFileName
+                if machineJsonFile.exists():
+                    mDict = self.__loadJsonDictFromFile(
+                        machineJsonFile.as_posix())
+                else :
+                    continue
+
+                # Read each results file and populate the machineResults list.
+                # This will contain either BenchmarkInfo objs or tuples of
+                # (BenchmarkInfo, [BenchmarkResult objs, ...]) based on infoOnly
+                machineResults = []
+                for resultsFile in machineDir.iterdir():
+                    if resultsFile == machineJsonFile:
+                        continue
+                    rDict = self.__loadJsonDictFromFile(resultsFile.as_posix())
+
+                    resultsParams = rDict.get("params", {})
+                    # Each results file has a single BenchmarkInfo obj
+                    # describing it.
+                    bi = BenchmarkInfo(
+                        machineName=mDict.get("machine", ""),
+                        cudaVer=resultsParams.get("cuda", ""),
+                        osType=resultsParams.get("os", ""),
+                        pythonVer=resultsParams.get("python", ""),
+                        commitHash=rDict.get("commit_hash", ""),
+                        commitTime=rDict.get("date", ""),
+                        gpuType=mDict.get("gpu", ""),
+                        cpuType=mDict.get("cpu", ""),
+                        arch=mDict.get("arch", ""),
+                        ram=mDict.get("ram", "")
+                    )
+
+                    # If a filter was specified, at least one EXACT MATCH to the
+                    # BenchmarkInfo obj must be present.
+                    if filterByInfoObjs and not(bi in filterByInfoObjs):
+                        continue
+
+                    if infoOnly:
+                        machineResults.append(bi)
+                    else:
+                        # FIXME: if results not in rDict, throw better error
+                        resultsDict = rDict["results"]
+                        # Populate the list of BenchmarkResult objs associated
+                        # with the BenchmarkInfo obj
+                        resultObjs = []
+                        for benchmarkName in resultsDict:
+                            # benchmarkSpec is the entry in benchmarks.json,
+                            # which is needed for the param names
+                            if benchmarkName not in bDict:
+                                print("WARNING: Encountered benchmark name "
+                                      "that is not in "
+                                      f"{self.benchmarksFileName}: "
+                                      f"file: {resultsFile.as_posix()} "
+                                      f"invalid name\"{benchmarkName}\", skipping.")
+                                continue
+
+                            benchmarkSpec = bDict[benchmarkName]
+                            # benchmarkResults is the entry in this particular
+                            # result file for this benchmark
+                            benchmarkResults = resultsDict[benchmarkName]
+
+                            paramNames = benchmarkSpec["param_names"]
+                            paramValues = benchmarkResults["params"]
+                            results = benchmarkResults["result"]
+                            # Inverse of the write operation described in
+                            # self.__updateResultJson()
+                            paramsCartProd = list(itertools.product(*paramValues))
+                            for (paramValueCombo, result) in zip(paramsCartProd, results):
+                                br = BenchmarkResult(
+                                    funcName=benchmarkName,
+                                    argNameValuePairs=zip(paramNames, paramValueCombo),
+                                    result=result)
+                                unit = benchmarkSpec.get("unit")
+                                if unit is not None:
+                                    br.unit = unit
+                                resultObjs.append(br)
+                        machineResults.append((bi, resultObjs))
+
+                retList += machineResults
+
+        return retList
+
+
+    def __assertDbDirExists(self):
+        if not(path.isdir(self.dbDir)):
+            raise FileNotFoundError(f"{self.dbDir} does not exist or is not a "
+                                    "directory")
+
+
+    def __ensureDbDirExists(self):
+        if not(path.exists(self.dbDir)):
+            os.mkdir(self.dbDir)
+            # Hack: os.mkdir() seems to return before the filesystem catches up,
+            # so pause before returning to help ensure the dir actually exists
+            time.sleep(0.1)
+
+
+    def __updateConfFile(self):
+        """
+        Update the conf file with the settings in this ASVDb instance.
+        """
+        if self.repo is None:
+            raise AttributeError("repo must be set to non-None before "
+                                 f"writing {self.confFilePath}")
+
+        d = self.__loadJsonDictFromFile(self.confFilePath)
+        # ASVDb is git-only for now, so ensure .git extension
+        d["repo"] = self.repo + (".git" if not self.repo.endswith(".git") else "")
+        currentBranches = d.get("branches", [])
+        d["branches"] = currentBranches + [b for b in (self.branches or []) if b not in currentBranches]
+        d["version"] = self.confVersion
+        d["project"] = self.projectName or self.repo.replace(".git", "").split("/")[-1]
+        d["show_commit_url"] = self.commitUrl or \
+                               (self.repo.replace(".git", "") \
+                                + ("/" if not self.repo.endswith("/") else "") \
+                                + "commit/")
+
+        self.__writeJsonDictToFile(d, self.confFilePath)
+
 
 
     def __updateBenchmarkJson(self, benchmarkResult):
@@ -331,13 +640,9 @@ class ASVDb:
         """
         if path.exists(jsonFile):
             with open(jsonFile) as fobj:
-                # some situations do not allow grabbing a file lock (NFS?) so
-                # just ignore for now (TODO: use a different locking mechanism)
-                try:
-                    fcntl.flock(fobj, fcntl.LOCK_EX)
-                except OSError as e:
-                    print("Could not get file lock, ignoring. (OSError: %s)" % e)
-
+                # FIXME: ideally this could use flock(), but some situations do
+                # not allow grabbing a file lock (NFS?)
+                # fcntl.flock(fobj, fcntl.LOCK_EX)
                 # FIXME: error checking
                 return json.load(fobj)
 
@@ -349,12 +654,162 @@ class ASVDb:
         dirPath = path.dirname(filePath)
         if not path.isdir(dirPath):
             os.makedirs(dirPath)
-        with open(filePath, "w") as fobj:
-            # some situations do not allow grabbing a file lock (NFS?) so just
-            # ignore for now (TODO: use a different locking mechanism)
-            try:
-                fcntl.flock(fobj, fcntl.LOCK_EX)
-            except OSError as e:
-                print("Could not get file lock, ignoring. (OSError: %s)" % e)
 
+        with open(filePath, "w") as fobj:
+            # FIXME: ideally this could use flock(), but some situations do not
+            # allow grabbing a file lock (NFS?)
+            # fcntl.flock(fobj, fcntl.LOCK_EX)
             json.dump(jsonDict, fobj, indent=2)
+
+
+    ###########################################################################
+    # ASVDb private locking methods
+    ###########################################################################
+    def __getLock(self, dirPath):
+        """
+        Gets a lock on dirPath against other ASVDb instances (in other
+        processes, possibily on other machines) using the following technique:
+
+        * Check for other locks and clear them if they've been seen for longer
+          than self.lockfileTimeout (do this to help cleanup after others that
+          may have died prematurely)
+
+        * Once all locks are clear - either by their owner because they
+          finished their read/write, or by removing them because they're
+          presumed dead - create a lock for this instance
+
+        * If a race condition was detected, probably because multiple ASVDbs
+          saw all locks were cleared at the same time and created their locks
+          at the same time, remove this lock, and wait a random amount of time
+          before trying again.  The random time prevents yet another race.
+        """
+        otherLockfileTimes = {}
+        thisLockfile = path.join(dirPath, self.lockfileName)
+        # FIXME: This shouldn't be needed? But if so, be smarter about
+        # preventing an infintite loop?
+        i = 0
+        while i < 1000:
+            # Keep checking for other locks to clear
+            self.__updateOtherLockfileTimes(dirPath, otherLockfileTimes)
+            # FIXME: potential infintite loop due to starvation?
+            otherLocks = list(otherLockfileTimes.keys())
+            while otherLocks:
+                if self.debugPrint:
+                    print(f"This lock file will be {thisLockfile} but other "
+                          f"locks present: {otherLocks}, waiting to try to "
+                          "lock again...")
+                time.sleep(0.2)
+                self.__updateOtherLockfileTimes(dirPath, otherLockfileTimes)
+                otherLocks = list(otherLockfileTimes.keys())
+
+            # All clear, create lock
+            if self.debugPrint:
+                print(f"All clear, setting lock {thisLockfile}")
+            self.__createLockfile(dirPath)
+
+            # Check for a race condition where another lock could have been created
+            # while creating the lock for this instance.
+            self.__updateOtherLockfileTimes(dirPath, otherLockfileTimes)
+
+            # If another lock snuck in while this instance was creating its
+            # lock, remove this lock and wait a random amount of time before
+            # trying again (random time to prevent another race condition with
+            # the competing instance, this way someone will clearly get there
+            # first)
+            if otherLockfileTimes:
+                self.__releaseLock(dirPath)
+                randTime = (int(5 * random.random()) + 1) + random.random()
+                if self.debugPrint:
+                    print(f"Collision - waiting {randTime} seconds before "
+                          "trying to lock again.")
+                time.sleep(randTime)
+            else:
+                break
+
+            i += 1
+
+
+    def __releaseLock(self, dirPath):
+        thisLockfile = path.join(dirPath, self.lockfileName)
+        if self.debugPrint:
+            print(f"Removing lock {thisLockfile}")
+        self.__removeFiles([thisLockfile])
+
+
+    def __updateOtherLockfileTimes(self, dirPath, lockfileTimes):
+        """
+        Return a list of lockfiles that have "timed out", probably because their
+        process was killed. This will never include the lockfile for this
+        instance.  Update the lockfileTimes dict as a side effect with the
+        discovery time of any new lockfiles and remove any lockfiles that are no
+        longer present.
+        """
+        thisLockfile = path.join(dirPath, self.lockfileName)
+        now = time.time()
+        expired = []
+
+        allLockfiles = glob.glob(path.join(dirPath, self.lockfilePrefix) + "*")
+
+        if self.debugPrint:
+            print(f"   This lockfile is {thisLockfile}, allLockfiles is "
+                  f"{allLockfiles}, lockfileTimes is {lockfileTimes}")
+        # Remove lockfiles from the lockfileTimes dict that are no longer
+        # present on disk
+        lockfilesToRemove = set(lockfileTimes.keys()) - set(allLockfiles)
+        for removedLockfile in lockfilesToRemove:
+            lockfileTimes.pop(removedLockfile)
+
+        # check for expired lockfiles while also setting the discovery time on
+        # new lockfiles in the lockfileTimes dict.
+        for lockfile in allLockfiles:
+            if lockfile == thisLockfile:
+                continue
+            if (now - lockfileTimes.setdefault(lockfile, now)) > \
+               self.lockfileTimeout:
+                expired.append(lockfile)
+
+        if self.debugPrint:
+            print(f"   This lockfile is {thisLockfile}, lockfileTimes is "
+                  f"{lockfileTimes}, now is {now}, expired is {expired}")
+        self.__removeFiles(expired)
+
+
+    def __createLockfile(self, dirPath):
+        """
+        low-level lockfile creation - consider calling __getLock() instead.
+        """
+        thisLockfile = path.join(dirPath, self.lockfileName)
+        open(thisLockfile, "w").close()
+        # Make the lockfile read/write to all so others can remove it if this
+        # process dies prematurely
+        os.chmod(thisLockfile, (stat.S_IRUSR | stat.S_IWUSR
+                                | stat.S_IRGRP | stat.S_IWGRP
+                                | stat.S_IROTH | stat.S_IWOTH))
+
+
+    def __removeFiles(self, fileList):
+        for f in fileList:
+            try:
+                os.remove(f)
+            except FileNotFoundError:
+                pass
+
+
+    def __waitForWrite(self):
+        """
+        Testing helper: pause for self.writeDelay seconds, or until
+        self.cancelWrite turns True. Always set self.cancelWrite back to False
+        so future writes can take place by default.
+
+        Return True to indicate a write operation should take place, False to
+        cancel the write operation, based on if the write was cancelled or not.
+        """
+        if not(self.cancelWrite):
+            st = now = time.time()
+            while ((now - st) < self.writeDelay) and not(self.cancelWrite):
+                time.sleep(0.01)
+                now = time.time()
+
+        retVal = not(self.cancelWrite)
+        self.cancelWrite = False
+        return retVal

@@ -1,6 +1,6 @@
 package:
     name: asvdb
-    version: 0.1.8dev0
+    version: 0.2.0dev0
 
 source:
     #git_url: https://github.com/rlratzel/asvdb.git

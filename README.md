@@ -2,11 +2,27 @@
 
 Python interface to a ASV "database", as described [here](https://asv.readthedocs.io/en/stable/dev.html?highlight=%24results_dir#benchmark-suite-layout-and-file-formats).
 
-NOTE: This is currently a "write-only" interface.
+## Examples:
 
-Example:
+### Read results from the "database"
+```
+>>> import asvdb
+>>> db = asvdb.ASVDb("/path/to/benchmarks/asv")
+>>>
+>>> results = db.getResults()  # Get a list of (BenchmarkInfo obj, [BenchmarkResult obj, ...]) tuples.
+>>> len(results)
+9
+>>> firstResult = results[0]
+>>> firstResult[0]
+BenchmarkInfo(machineName='my_machine', cudaVer='9.2', osType='debian', pythonVer='3.6', commitHash='f6242e77bf32ed12c78ddb3f9a06321b2fd11806', commitTime=1589322352000, gpuType='Tesla V100-SXM2-32GB', cpuType='x86_64', arch='x86_64', ram='540954406912')
+>>> len(firstResult[1])
+132
+>>> firstResult[1][0]
+BenchmarkResult(funcName='bench_algos.bench_create_edgelist_time', result=0.46636209040880205, argNameValuePairs=[('csvFileName', '../datasets/csv/undirected/hollywood.csv')], unit='seconds')
+>>>
+```
 
-Add benchmark results to the "database"
+### Add benchmark results to the "database"
 ```
 import platform
 import psutil
