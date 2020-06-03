@@ -15,7 +15,7 @@ class BenchmarkInfo:
     """
     def __init__(self, machineName="", cudaVer="", osType="", pythonVer="",
                  commitHash="", commitTime=0,
-                 gpuType="", cpuType="", arch="", ram=""):
+                 gpuType="", cpuType="", arch="", ram="", gpuRam=""):
         self.machineName = machineName
         self.cudaVer = cudaVer
         self.osType = osType
@@ -27,6 +27,7 @@ class BenchmarkInfo:
         self.cpuType = cpuType
         self.arch = arch
         self.ram = ram
+        self.gpuRam = gpuRam
 
 
     def __repr__(self):
@@ -39,7 +40,8 @@ class BenchmarkInfo:
                 f", gpuType='{self.gpuType}'"
                 f", cpuType='{self.cpuType}'"
                 f", arch='{self.arch}'"
-                f", ram={repr(self.ram)})")
+                f", ram={repr(self.ram)})"
+                f", gpuRam={repr(self.gpuRam)})")
 
 
     def __eq__(self, other):
@@ -52,7 +54,8 @@ class BenchmarkInfo:
             and (self.gpuType == other.gpuType) \
             and (self.cpuType == other.cpuType) \
             and (self.arch == other.arch) \
-            and (self.ram == other.ram)
+            and (self.ram == other.ram) \
+            and (self.gpuRam == other.gpuRam)
 
 
 class BenchmarkResult:
@@ -497,6 +500,7 @@ class ASVDb:
         d["machine"] = benchmarkInfo.machineName
         #d["os"] = benchmarkInfo.osType
         d["ram"] = benchmarkInfo.ram
+        d["gpuRam"] = benchmarkInfo.gpuRam
         d["version"] = 1
         self.__writeJsonDictToFile(d, machineFilePath)
 
