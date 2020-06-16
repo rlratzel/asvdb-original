@@ -8,26 +8,50 @@ import time
 import random
 import stat
 
+BenchmarkInfoKeys = set([
+    "machineName",
+    "cudaVer",
+    "osType",
+    "pythonVer",
+    "commitHash",
+    "commitTime",
+    "branch",
+    "gpuType",
+    "cpuType",
+    "arch",
+    "ram",
+    "gpuRam",
+    "requirements",
+])
+
+BenchmarkResultKeys = set([
+    "funcName",
+    "result",
+    "argNameValuePairs",
+])
+
 
 class BenchmarkInfo:
     """
     Meta-data describing the environment for a benchmark or set of benchmarks.
     """
     def __init__(self, machineName="", cudaVer="", osType="", pythonVer="",
-                 commitHash="", commitTime=0,
-                 gpuType="", cpuType="", arch="", ram="", gpuRam=""):
+                 commitHash="", commitTime=0, branch="",
+                 gpuType="", cpuType="", arch="", ram="", gpuRam="",
+                 requirements=None):
         self.machineName = machineName
         self.cudaVer = cudaVer
         self.osType = osType
         self.pythonVer = pythonVer
         self.commitHash = commitHash
         self.commitTime = int(commitTime)
-
+        self.branch = branch
         self.gpuType = gpuType
         self.cpuType = cpuType
         self.arch = arch
         self.ram = ram
         self.gpuRam = gpuRam
+        self.requirements = requirements or {}
 
 
     def __repr__(self):
@@ -37,11 +61,14 @@ class BenchmarkInfo:
                 f", pythonVer='{self.pythonVer}'"
                 f", commitHash='{self.commitHash}'"
                 f", commitTime={self.commitTime}"
+                f", branch={self.branch}"
                 f", gpuType='{self.gpuType}'"
                 f", cpuType='{self.cpuType}'"
                 f", arch='{self.arch}'"
-                f", ram={repr(self.ram)})"
-                f", gpuRam={repr(self.gpuRam)})")
+                f", ram={repr(self.ram)}"
+                f", gpuRam={repr(self.gpuRam)}"
+                f", requirements={repr(self.requirements)}"
+                ")")
 
 
     def __eq__(self, other):
@@ -51,11 +78,13 @@ class BenchmarkInfo:
             and (self.pythonVer == other.pythonVer) \
             and (self.commitHash == other.commitHash) \
             and (self.commitTime == other.commitTime) \
+            and (self.branch == other.branch) \
             and (self.gpuType == other.gpuType) \
             and (self.cpuType == other.cpuType) \
             and (self.arch == other.arch) \
             and (self.ram == other.ram) \
-            and (self.gpuRam == other.gpuRam)
+            and (self.gpuRam == other.gpuRam) \
+            and (self.requirements == other.requirements)
 
 
 class BenchmarkResult:
@@ -64,7 +93,7 @@ class BenchmarkResult:
     specific args.
     """
     def __init__(self, funcName, result, argNameValuePairs=None, unit=None):
-        self.name = funcName
+        self.funcName = funcName
         self.argNameValuePairs = self.__sanitizeArgNameValues(argNameValuePairs)
         self.result = result
         self.unit = unit or "seconds"
@@ -77,14 +106,15 @@ class BenchmarkResult:
 
 
     def __repr__(self):
-        return (f"{self.__class__.__name__}(funcName='{self.name}'"
+        return (f"{self.__class__.__name__}(funcName='{self.funcName}'"
                 f", result={repr(self.result)}"
                 f", argNameValuePairs={repr(self.argNameValuePairs)}"
-                f", unit='{self.unit}')")
+                f", unit='{self.unit}'"
+                ")")
 
 
     def __eq__(self, other):
-        return (self.name == other.name) \
+        return (self.funcName == other.funcName) \
             and (self.argNameValuePairs == other.argNameValuePairs) \
             and (self.result == other.result) \
             and (self.unit == other.unit)
@@ -306,10 +336,13 @@ class ASVDb:
                         pythonVer=resultsParams.get("python", ""),
                         commitHash=rDict.get("commit_hash", ""),
                         commitTime=rDict.get("date", ""),
+                        branch=rDict.get("branch", ""),
                         gpuType=mDict.get("gpu", ""),
                         cpuType=mDict.get("cpu", ""),
                         arch=mDict.get("arch", ""),
-                        ram=mDict.get("ram", "")
+                        ram=mDict.get("ram", ""),
+                        gpuRam=mDict.get("gpuRam", ""),
+                        requirements=rDict.get("requirements", {})
                     )
 
                     # If a filter was specified, at least one EXACT MATCH to the
@@ -438,9 +471,9 @@ class ASVDb:
 
         d = self.__loadJsonDictFromFile(self.benchmarksFilePath)
 
-        benchDict = d.setdefault(benchmarkResult.name,
+        benchDict = d.setdefault(benchmarkResult.funcName,
                                  self.__getDefaultBenchmarkDescrDict(
-                                     benchmarkResult.name, newParamNames))
+                                     benchmarkResult.funcName, newParamNames))
         benchDict["unit"] = benchmarkResult.unit
 
         existingParamNames = benchDict["param_names"]
@@ -455,7 +488,7 @@ class ASVDb:
         if numExistingParams != numNewParams:
             raise ValueError("result for %s had %d params in benchmarks.json, "
                              "but new result has %d params" \
-                             % (benchmarkResult.name, numExistingParams,
+                             % (benchmarkResult.funcName, numExistingParams,
                                 numNewParams))
         numParams = numNewParams
 
@@ -469,7 +502,7 @@ class ASVDb:
                     if newParamValues[i] not in existingParamValues[i]:
                         existingParamValues[i].append(newParamValues[i])
 
-        d[benchmarkResult.name] = benchDict
+        d[benchmarkResult.funcName] = benchDict
 
         # a version key must always be present in self.benchmarksFilePath,
         # "current" ASV version requires this to be 2 (or higher?)
@@ -551,9 +584,10 @@ class ASVDb:
                        "os": benchmarkInfo.osType,
                        "python": benchmarkInfo.pythonVer,
                        }
-        d["requirements"] = {}
+        d["requirements"] = benchmarkInfo.requirements
+
         allResultsDict = d.setdefault("results", {})
-        resultDict = allResultsDict.setdefault(benchmarkResult.name, {})
+        resultDict = allResultsDict.setdefault(benchmarkResult.funcName, {})
 
         existingParamValuesList = resultDict.setdefault("params", [])
         existingResultValueList = resultDict.setdefault("result", [])
@@ -577,7 +611,7 @@ class ASVDb:
 
             # ASV uses the cartesian product of the param values for looking up
             # the result for a particular combination of param values.  For
-            # example: "params": [ ["a"], ["b", "c"], ["d", "e"] results in:
+            # example: "params": [["a"], ["b", "c"], ["d", "e"]] results in:
             # [("a", "b", "d"), ("a", "b", "e"), ("a", "c", "d"), ("a", "c",
             # "e")] and each combination of param values has a result, with the
             # results for the corresponding param values in the same order.  If
@@ -604,6 +638,7 @@ class ASVDb:
         resultDict["result"] = results
 
         d["commit_hash"] = benchmarkInfo.commitHash
+        d["branch"] = benchmarkInfo.branch
         d["date"] = int(benchmarkInfo.commitTime)
         d["python"] = benchmarkInfo.pythonVer
         d["version"] = 1

@@ -40,6 +40,7 @@ def createAndPopulateASVDb(dbDir):
                           pythonVer="3.6",
                           commitHash=commitHash,
                           commitTime=commitTime,
+                          branch=branch,
                           gpuType="n/a",
                           cpuType="x86_64",
                           arch="my_arch",
@@ -234,7 +235,7 @@ def test_concurrency_stress():
     assert len(results[0][1]) == num
 
     # Simply check that all unique func names were read back in.
-    allFuncNamesCheck = [r.name for r in results[0][1]]
+    allFuncNamesCheck = [r.funcName for r in results[0][1]]
     assert sorted(allFuncNames) == sorted(allFuncNamesCheck)
 
     tmpDir.cleanup()
@@ -260,6 +261,7 @@ def test_read():
     assert bi.machineName == machineName
     assert bi.commitHash == commitHash
     assert bi.commitTime == commitTime
+    assert bi.branch == branch
 
     # getResults() returns a list of tuples:
     # (BenchmarkInfo obj, [BenchmarkResult obj, ...])
@@ -269,7 +271,7 @@ def test_read():
     results = brList[0][1]
     assert len(results) == len(algoRunResults)
     br = results[0]
-    assert br.name == algoRunResults[0][0]
+    assert br.funcName == algoRunResults[0][0]
     assert br.argNameValuePairs == [("dataset", datasetName)]
     assert br.result == algoRunResults[0][1]
 

@@ -1,7 +1,14 @@
 from setuptools import setup
 
+import asvdb
+
 setup(name="asvdb",
-      version="0.2.1dev0",
+      version=asvdb.__version__,
       packages=["asvdb"],
       description='ASV "database" interface',
-      )
+      entry_points={
+          "console_scripts": [
+              "asvdb = asvdb.__main__:main"
+          ]
+      },
+)
