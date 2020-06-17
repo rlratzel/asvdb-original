@@ -222,6 +222,13 @@ class ASVDb:
         try:
             self.__getLock(self.dbDir)
             if self.__waitForWrite():
+                # special case: if the benchmarkInfo has a new branch specified,
+                # update self.branches so the conf files includes the new branch
+                # name.
+                newBranch = benchmarkInfo.branch
+                if newBranch and newBranch not in self.branches:
+                    self.branches.append(newBranch)
+
                 # The comments below assume default dirname values (mainly
                 # "results"), which can be changed in the asv.conf.json file.
                 #
