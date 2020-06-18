@@ -1,10 +1,133 @@
 # ASVDb
 
-Python interface to a ASV "database", as described [here](https://asv.readthedocs.io/en/stable/dev.html?highlight=%24results_dir#benchmark-suite-layout-and-file-formats).
+Python and command-line interface to a ASV "database", as described [here](https://asv.readthedocs.io/en/stable/dev.html?highlight=%24results_dir#benchmark-suite-layout-and-file-formats).
+
+The `asvdb` CLI can be used for inspecting the contents of a database, creating new databases based on specific contents of others, editing the contents of an existing database, and possibly more.
+
+The `asvdb` python library can be used for the same tasks as the CLI, but is intended to be called directly from another application (benchmarking tool, notebook, test code, etc.) and is designed for adding new benchmark results easily.
+
+## `asvdb` CLI:
+From the help:
+```
+usage: asvdb [-h] [--version] [--read-from PATH] [--list-keys] [--filter EXPR]
+             [--exec CMD] [--exec-once CMD] [--print PRINTEXPR]
+             [--write-to PATH]
+
+Examine or update an ASV 'database' row-by-row.
+
+optional arguments:
+  -h, --help         show this help message and exit
+  --version          Print the current verison of asvdb and exit.
+  --read-from PATH   Path to ASV db dir to read data from.
+  --list-keys        List all keys found in the database to STDOUT.
+  --filter EXPR      Action which filters the current results based on the
+                     evaluation of EXPR.
+  --exec CMD         Action which executes CMD on each of the current results.
+  --exec-once CMD    Action which executes CMD once (is not executed for each
+                     result).
+  --print PRINTEXPR  Action which evaluates PRINTEXPR in a print() statement
+                     for each of the current results.
+  --write-to PATH    Path to ASV db dir to write data to. PATH is created if
+                     it does not exist.
+
+The database is read and each 'row' (an individual result and its context) has
+the various expressions evaluated in the context of the row (see --list-keys for
+all the keys that can be used in an expression/command).  Each action can
+potentially modify the list of rows for the next action. Actions can be chained
+to perform complex queries or updates, and all actions are performed in the
+order which they were specified on the command line.
+
+The --exec-once action is an exception in that it does not execute on every row,
+but instead only once in the context of the global namespace. This allows for
+the creation of temp vars or other setup steps that can be used in
+expressions/commands in subsequent actions. Like other actions, --exec-once can
+be chained with other actions and called multiple times.
+
+The final list of rows will be written to the destination database specified by
+--write-to, if provided. If the path to the destination database does not exist,
+it will be created. If the destination database does exist, it will be updated
+with the results in the final list of rows.
+
+Remember, an ASV database stores results based on the commitHash, so modifying
+the commitHash for a result and writing it back to the same databse results in a
+new, *additional* result as opposed to a modified one. All updates to the
+database specified by --write-to either modify an existing result or add new
+results, and results cannot be removed from a database. In order to effectively
+remove results, a user can --write-to a new database with only the results they
+want, then replace the original with the new using file system commands (rm the
+old one, mv the new one to the old one's name, etc.)
+```
 
 ## Examples:
 
-### Read results from the "database"
+### `asvdb` CLI tool
+- Print the number of results in the database
+```
+(rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --exec-once="i=0" --exec="i+=1" --exec-once="print(i)"
+2040
+```
+This uses `--exec-once` to initialize a var `i` to 0, then execute `i+=1` for each row (result), then `--exec-once` to print the final value of `i`. `--exec-once` only executes once as opposed to once-per-row.
+
+- Check which branches are in the database
+```
+(rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --exec-once="branches=set()" --exec="branches.add(branch)" --exec-once="print(branches)"
+{'branch-0.14', 'branch-0.15'}
+```
+   or slightly easier using unix tools:
+```
+(rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --print="branch" | sort -u
+branch-0.14
+branch-0.15
+```
+In the above example, the `sort -u` is used to limit the output to only unique items. Since `asvdb` operates on every row (except when using `--exec-once`), it will apply the print expression to every row. In the example above, that would result in 2040 prints (one per result).
+
+- Get the results for a specific benchmark, with specific param values, for all commits
+```
+(rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir \                                                                                                                                                                                                                > --filter="funcName=='bench_algos.bench_pagerank_time' and argNameValuePairs==[('dataset', 'dataset1.csv'), ('arg1', 'False'), ('arg2', 'True')]" \
+> --print="commitHash, result, unit"
+c29c3e359d1d945ef32b6867809a331f460d3e46 0.08153173069541271 seconds
+8f077b8700cc5d1b4632c429557eaed6057e03a1 0.08153173069541271 seconds
+ff154939008654e62b6696cee825dc971c544b5b 0.08153173069541271 seconds
+da0a9f8e66696a4c6683055bc22c7378b7430041 0.08153173069541271 seconds
+e5ae3c3fcd1f414dea2be83e0564f09fe3365ea9 0.08153173069541271 seconds
+```
+
+- Get the requirements (dependencies) used for a specific commit
+```
+(rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --filter="commitHash=='c29c3e359d1d945ef32b6867809a331f460d3e46'" --print="requirements"|sort -u
+{'cudf': '0.14.200528', 'packageA': '0.0.6', 'packageB': '0.9.5'}
+```
+
+- Change the unit string for specific benchmarks
+```
+(rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --filter="funcName=='bench_algos.bench_pagerank_time'" --print=unit|sort -u
+seconds
+(rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --filter="funcName=='bench_algos.bench_pagerank_time'" --exec="unit='milliseconds'" --write-to=./my_asv_dir
+(rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --filter="funcName=='bench_algos.bench_pagerank_time'" --print=unit|sort -u
+milliseconds
+```
+
+- Read an existing database and create a new database containing only the latest commit from branch-0.14 and branch-0.15
+```
+(rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --print="commitTime, branch, commitHash"|sort -u
+1591733122000 branch-0.14 da0a9f8e66696a4c6683055bc22c7378b7430041
+1591733228000 branch-0.14 e5ae3c3fcd1f414dea2be83e0564f09fe3365ea9
+1591733272000 branch-0.15 ff154939008654e62b6696cee825dc971c544b5b
+1591733292000 branch-0.14 c29c3e359d1d945ef32b6867809a331f460d3e46
+1591738722000 branch-0.15 8f077b8700cc5d1b4632c429557eaed6057e03a1
+
+(rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir \
+> --exec-once="latest={}" \
+> --exec="latest[branch]=max(commitTime, latest.get(branch,0))" \
+> --filter="branch in ['branch-0.14', 'branch-0.15'] and commitTime==latest[branch]" \
+> --write-to=./new_asv_dir
+
+(rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./new_asv_dir --print="commitTime, branch, commitHash"|sort -u
+1591733292000 branch-0.14 c29c3e359d1d945ef32b6867809a331f460d3e46
+1591738722000 branch-0.15 8f077b8700cc5d1b4632c429557eaed6057e03a1
+```
+
+### `asvdb` Python library - Read results from the "database"
 ```
 >>> import asvdb
 >>> db = asvdb.ASVDb("/path/to/benchmarks/asv")
@@ -22,7 +145,7 @@ BenchmarkResult(funcName='bench_algos.bench_create_edgelist_time', result=0.4663
 >>>
 ```
 
-### Add benchmark results to the "database"
+### `asvdb` Python library - Add benchmark results to the "database"
 ```
 import platform
 import psutil
