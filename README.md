@@ -97,12 +97,15 @@ e5ae3c3fcd1f414dea2be83e0564f09fe3365ea9 0.08153173069541271 seconds
 (rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --filter="commitHash=='c29c3e359d1d945ef32b6867809a331f460d3e46'" --print="requirements"|sort -u
 {'cudf': '0.14.200528', 'packageA': '0.0.6', 'packageB': '0.9.5'}
 ```
+Even though this is limiting the rows to just one commit (by using the `--filter` action), there are still several results from the various runs done on that commit, hence the `sort -u`
 
 - Change the unit string for specific benchmarks
 ```
 (rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --filter="funcName=='bench_algos.bench_pagerank_time'" --print=unit|sort -u
 seconds
+
 (rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --filter="funcName=='bench_algos.bench_pagerank_time'" --exec="unit='milliseconds'" --write-to=./my_asv_dir
+
 (rapids) root@f078ef9f2198:/tmp# asvdb --read-from=./my_asv_dir --filter="funcName=='bench_algos.bench_pagerank_time'" --print=unit|sort -u
 milliseconds
 ```
@@ -126,6 +129,12 @@ milliseconds
 1591733292000 branch-0.14 c29c3e359d1d945ef32b6867809a331f460d3e46
 1591738722000 branch-0.15 8f077b8700cc5d1b4632c429557eaed6057e03a1
 ```
+In the above example, a new database is created by reading and filtering out only the latest commits for `branch-0.14` and `branch-0.15` from an existing database, then writing the filtered results to a new database.  This is done using several actions chained together:
+1) initialize a dict named `latest` used to hold the latest `commitTime` for each `branch`
+2) evaluate each row to update `latest` for the row's `branch` with the `commitTime` with the (potentially) higher time value
+3) filter the rows to include only branches that are `branch-0.14` or `branch-0.15` **and** have the latest `commitTime`
+4) finally, write the resulting rows to the new database.
+
 
 ### `asvdb` Python library - Read results from the "database"
 ```
