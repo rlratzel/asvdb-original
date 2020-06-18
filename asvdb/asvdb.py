@@ -28,6 +28,7 @@ BenchmarkResultKeys = set([
     "funcName",
     "result",
     "argNameValuePairs",
+    "unit",
 ])
 
 
