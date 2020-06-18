@@ -67,6 +67,44 @@ def test_addResult():
     asvDir.cleanup()
 
 
+def test_addResults():
+    asvDir = tempfile.TemporaryDirectory()
+    from asvdb import ASVDb, BenchmarkInfo, BenchmarkResult
+
+    dbDir = asvDir.name
+    db = ASVDb(dbDir, repo, [branch])
+    bInfo = BenchmarkInfo(machineName=machineName,
+                          cudaVer="9.2",
+                          osType="linux",
+                          pythonVer="3.6",
+                          commitHash=commitHash,
+                          commitTime=commitTime,
+                          branch=branch,
+                          gpuType="n/a",
+                          cpuType="x86_64",
+                          arch="my_arch",
+                          ram="123456")
+
+    resultList = []
+    for (algoName, exeTime) in algoRunResults:
+        bResult = BenchmarkResult(funcName=algoName,
+                                  argNameValuePairs=[("dataset", datasetName)],
+                                  result=exeTime)
+        resultList.append(bResult)
+
+    db.addResults(bInfo, resultList)
+
+    # read back in and check
+    dbCheck = ASVDb(dbDir, repo, [branch])
+    retList = dbCheck.getResults()
+    assert len(retList) == 1
+    assert retList[0][0] == bInfo
+    assert len(retList[0][1]) == len(algoRunResults)
+    assert resultList == retList[0][1]
+
+    asvDir.cleanup()
+
+
 def test_writeWithoutRepoSet():
     from asvdb import ASVDb
 

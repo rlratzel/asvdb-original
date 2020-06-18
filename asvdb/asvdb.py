@@ -133,7 +133,8 @@ class ASVDb:
     machineFileName = "machine.json"
     lockfilePrefix = ".asvdbLOCK"
 
-    def __init__(self, dbDir, repo=None, branches=None, projectName=None, commitUrl=None):
+    def __init__(self, dbDir,
+                 repo=None, branches=None, projectName=None, commitUrl=None):
         """
         dbDir - directory containing the ASV results, config file, etc.
         repo - the repo associated with all reasults in the DB.
@@ -222,24 +223,25 @@ class ASVDb:
         try:
             self.__getLock(self.dbDir)
             if self.__waitForWrite():
-                # special case: if the benchmarkInfo has a new branch specified,
-                # update self.branches so the conf files includes the new branch
-                # name.
-                newBranch = benchmarkInfo.branch
-                if newBranch and newBranch not in self.branches:
-                    self.branches.append(newBranch)
+                self.__updateFilesForInfo(benchmarkInfo)
+                self.__updateFilesForResult(benchmarkInfo, benchmarkResult)
+        finally:
+            self.__releaseLock(self.dbDir)
 
-                # The comments below assume default dirname values (mainly
-                # "results"), which can be changed in the asv.conf.json file.
-                #
-                # <self.dbDir>/asv.conf.json
-                self.__updateConfFile()
-                # <self.dbDir>/results/benchmarks.json
-                self.__updateBenchmarkJson(benchmarkResult)
-                # <self.dbDir>/results/<machine dir>/machine.json
-                self.__updateMachineJson(benchmarkInfo)
-                # <self.dbDir>/results/<machine dir>/<result file name>.json
-                self.__updateResultJson(benchmarkResult, benchmarkInfo)
+
+    def addResults(self, benchmarkInfo, benchmarkResultList):
+        """
+        Add each benchmarkResult obj in benchmarkResultList associated with
+        benchmarkInfo to the DB.  This will also update the conf file with the
+        CTOR args if not done already.
+        """
+        self.__ensureDbDirExists()
+        try:
+            self.__getLock(self.dbDir)
+            if self.__waitForWrite():
+                self.__updateFilesForInfo(benchmarkInfo)
+                for resultObj in benchmarkResultList:
+                    self.__updateFilesForResult(benchmarkInfo, resultObj)
         finally:
             self.__releaseLock(self.dbDir)
 
@@ -401,6 +403,38 @@ class ASVDb:
                 retList += machineResults
 
         return retList
+
+
+    def __updateFilesForInfo(self, benchmarkInfo):
+        """
+        Updates all the db files that are affected by a new BenchmarkInfo obj.
+        """
+        # special case: if the benchmarkInfo has a new branch specified,
+        # update self.branches so the conf files includes the new branch
+        # name.
+        newBranch = benchmarkInfo.branch
+        if newBranch and newBranch not in self.branches:
+            self.branches.append(newBranch)
+
+        # The comments below assume default dirname values (mainly
+        # "results"), which can be changed in the asv.conf.json file.
+        #
+        # <self.dbDir>/asv.conf.json
+        self.__updateConfFile()
+        # <self.dbDir>/results/<machine dir>/machine.json
+        self.__updateMachineJson(benchmarkInfo)
+
+
+    def __updateFilesForResult(self, benchmarkInfo, benchmarkResult):
+        """
+        Updates all the db files that are affected by a new BenchmarkResult
+        obj. This also requires the corresponding BenchmarkInfo obj since some
+        results files also include info data.
+        """
+        # <self.dbDir>/results/benchmarks.json
+        self.__updateBenchmarkJson(benchmarkResult)
+        # <self.dbDir>/results/<machine dir>/<result file name>.json
+        self.__updateResultJson(benchmarkResult, benchmarkInfo)
 
 
     def __assertDbDirExists(self):

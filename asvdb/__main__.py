@@ -3,9 +3,44 @@ from os import path
 
 import asvdb
 
+DESCRIPTION = "Examine or update an ASV 'database' row-by-row."
+
+EPILOG = """
+The database is read and each 'row' (an individual result and its context) has
+the various expressions evaluated in the context of the row (see --list-keys for
+all the keys that can be used in an expression/command).  Each action can
+potentially modify the list of rows for the next action. Actions can be chained
+to perform complex queries or updates, and all actions are performed in the
+order which they were specified on the command line.
+
+The --exec-once action is an exception in that it does not execute on every row,
+but instead only once in the context of the global namespace. This allows for
+the creation of temp vars or other setup steps that can be used in
+expressions/commands in subsequent actions. Like other actions, --exec-once can
+be chained with other actions and called multiple times.
+
+The final list of rows will be written to the destination database specified by
+--write-to, if provided. If the path to the destination database does not exist,
+it will be created. If the destination database does exist, it will be updated
+with the results in the final list of rows.
+
+Remember, an ASV database stores results based on the commitHash, so modifying
+the commitHash for a result and writing it back to the same databse results in a
+new, *additional* result as opposed to a modified one. All updates to the
+database specified by --write-to either modify an existing result or add new
+results, and results cannot be removed from a database. In order to effectively
+remove results, a user can --write-to a new database with only the results they
+want, then replace the original with the new using file system commands (rm the
+old one, mv the new one to the old one's name, etc.)
+"""
 
 def parseArgs(argv=None):
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=DESCRIPTION,
+        epilog=EPILOG
+    )
+
     parser.add_argument("--version", action="store_true",
                         help="Print the current verison of asvdb and exit.")
     parser.add_argument("--read-from", type=str, metavar="PATH",
@@ -13,26 +48,29 @@ def parseArgs(argv=None):
     parser.add_argument("--list-keys", action="store_true",
                         help="List all keys found in the database to STDOUT.")
     parser.add_argument("--filter", metavar="EXPR", dest="cmds",
-                        type=storeCmd("filter"), action="append",
-                        help="Filter the current results based on the "
-                        "evaluation of %(metavar)s.")
-    parser.add_argument("--exec", metavar="EXPR", dest="cmds",
-                        type=storeCmd("exec"), action="append",
-                        help="Execute %(metavar)s on each of the current "
-                        "results.")
+                        type=_storeActionArg("filter"), action="append",
+                        help="Action which filters the current results based "
+                        "on the evaluation of %(metavar)s.")
+    parser.add_argument("--exec", metavar="CMD", dest="cmds",
+                        type=_storeActionArg("exec"), action="append",
+                        help="Action which executes %(metavar)s on each of the "
+                        "current results.")
+    parser.add_argument("--exec-once", metavar="CMD", dest="cmds",
+                        type=_storeActionArg("exec_once"), action="append",
+                        help="Action which executes %(metavar)s once (is not "
+                        "executed for each result).")
     parser.add_argument("--print", metavar="PRINTEXPR", dest="cmds",
-                        type=storeCmd("print"), action="append",
-                        help="Evaluate %(metavar)s in a print() statement for "
-                        "each of the current results.")
+                        type=_storeActionArg("print"), action="append",
+                        help="Action which evaluates %(metavar)s in a print() "
+                        "statement for each of the current results.")
     parser.add_argument("--write-to", type=str, metavar="PATH",
                         help="Path to ASV db dir to write data to. %(metavar)s "
-                        "is created if it does not exist. If not specified, "
-                        "results are written to STDOUT.")
+                        "is created if it does not exist.")
 
     return parser.parse_args(argv)
 
 
-def storeCmd(cmdName):
+def _storeActionArg(cmdName):
     """
     Return a callable to be called by argparse that returns a tuple containing
     cmdName and the option given on the command line.
@@ -130,19 +168,28 @@ def execResults(resultTupleList, code):
     return resultTupleList
 
 
+def execOnce(resultTupleList, code):
+    """
+    Run the code once, ignoring the result list and updating the global
+    namespace.
+    """
+    exec(code, globals())
+    return resultTupleList
+
+
 def updateDb(dbObj, resultTupleList):
     """
     Write the results to the dbOj.
     """
     for (benchmarkInfo, benchmarkResults) in resultTupleList:
-        for result in benchmarkResults:
-            dbObj.addResult(benchmarkInfo, result)
+        dbObj.addResults(benchmarkInfo, benchmarkResults)
 
 
 def main():
     cmdMap = {"filter": filterResults,
               "print": printResults,
               "exec": execResults,
+              "exec_once": execOnce,
               }
     args = parseArgs()
 
